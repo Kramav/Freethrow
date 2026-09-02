@@ -1,0 +1,21 @@
+# Build output
+bin/
+obj/
+[Dd]ebug/
+[Rr]elease/
+artifacts/
+*.user
+*.suo
+
+# Visual Studio / Rider / VS Code
+.vs/
+.idea/
+*.vsidx
+
+# ONNX models are fetched by tools/install.ps1, never committed.
+models/*
+!models/README.md
+
+# Calibration profiles and captured fixtures are user data.
+fixtures/
+*.ftcal

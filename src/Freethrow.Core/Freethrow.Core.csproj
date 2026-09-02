@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Freethrow.Core is the platform-agnostic pipeline: capture contracts, perception
+    interfaces, gesture state, attention model, diagnostics.
+
+    Boundary rule (see the plan): this project must never reference user32, WinRT,
+    or any other Windows API. Everything platform-specific enters through an
+    interface implemented in Freethrow.Desktop. That is what keeps the pipeline
+    unit-testable with no camera and no desktop.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>Freethrow.Core</RootNamespace>
+    <AssemblyName>Freethrow.Core</AssemblyName>
+  </PropertyGroup>
+
+</Project>

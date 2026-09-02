@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Freethrow.Desktop is the Windows integration layer: camera capture (WinRT
+    MediaCapture, colour and infrared), window management, monitor topology and the
+    highlight overlay. Everything that touches user32 or WinRT lives here and is
+    exposed to Freethrow.Core only through interfaces.
+
+    Naming note: this project is deliberately NOT called Freethrow.Windows. A
+    namespace ending in ".Windows" shadows WinRT's own "Windows" root namespace, so
+    "Windows.Media.Capture" stops resolving inside it. "Desktop" also describes the
+    layer's job more accurately.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <SupportedOSPlatformVersion>10.0.17763.0</SupportedOSPlatformVersion>
+    <RootNamespace>Freethrow.Desktop</RootNamespace>
+    <AssemblyName>Freethrow.Desktop</AssemblyName>
+    <!-- Required to read locked SoftwareBitmap buffers without an extra copy per frame. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Freethrow.Core\Freethrow.Core.csproj" />
+  </ItemGroup>
+
+</Project>
