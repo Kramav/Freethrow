@@ -54,22 +54,34 @@ public sealed class HandLandmarkDetector : IDisposable
         ReadOnlySpan<float> landmarks = Dense(results, _outputNames[0]);
         float confidence = Dense(results, _outputNames[1])[0];
         float handedness = Dense(results, _outputNames[2])[0];
+        ReadOnlySpan<float> worldLandmarks = Dense(results, _outputNames[3]);
 
         var points = new Vector3[HandPose.LandmarkCount];
+        var worldPoints = new Vector3[HandPose.LandmarkCount];
         float depthScale = crop.Side / InputSize;
 
         for (int i = 0; i < HandPose.LandmarkCount; i++)
         {
             int offset = i * 3;
+
             Vector2 framePoint = crop.ToFrame(new Vector2(landmarks[offset], landmarks[offset + 1]));
 
             // Z is scaled the same way X and Y are so all three stay in one unit system,
             // but it is a weak signal and nothing downstream should lean on it.
             points[i] = new Vector3(framePoint.X, framePoint.Y, landmarks[offset + 2] * depthScale);
+
+            // World landmarks need the crop rotation undone but nothing else: they are
+            // already metric and already hand-relative. Depth passes through untouched,
+            // since the crop only ever rotated within the image plane.
+            Vector2 worldXy = crop.RotateToFrame(
+                new Vector2(worldLandmarks[offset], worldLandmarks[offset + 1]));
+
+            worldPoints[i] = new Vector3(worldXy.X, worldXy.Y, worldLandmarks[offset + 2]);
         }
 
         return new HandPose(
             points,
+            worldPoints,
             handedness >= 0.5f ? Handedness.Right : Handedness.Left,
             confidence);
     }
@@ -88,15 +100,16 @@ public sealed class HandLandmarkDetector : IDisposable
     /// </remarks>
     private void ValidateOutputs()
     {
-        if (_outputNames.Length < 3)
+        if (_outputNames.Length < 4)
         {
             throw new InvalidOperationException(
-                $"Hand landmark model must expose at least 3 outputs, found {_outputNames.Length}.");
+                $"Hand landmark model must expose at least 4 outputs, found {_outputNames.Length}.");
         }
 
         Expect(0, LandmarkValues, "screen landmarks");
         Expect(1, 1, "presence confidence");
         Expect(2, 1, "handedness");
+        Expect(3, LandmarkValues, "world landmarks");
 
         void Expect(int index, int lastDimension, string role)
         {

@@ -3,6 +3,7 @@ using System.IO;
 using System.Numerics;
 using System.Windows;
 using Freethrow.Core.Capture;
+using Freethrow.Core.Config;
 using Freethrow.Core.Diagnostics;
 using Freethrow.Core.Gestures;
 using Freethrow.Core.Perception;
@@ -39,6 +40,7 @@ internal static class Program
                 "--snap" or "-s" => Task.Run(() => SnapAsync(args)).GetAwaiter().GetResult(),
                 "--landmarks" => RunLandmarks(args),
                 "--track" or "-t" => Task.Run(() => TrackAsync(args)).GetAwaiter().GetResult(),
+                "--calibrate-grab" or "-c" => Task.Run(() => CalibrateGrabAsync(args)).GetAwaiter().GetResult(),
                 "--help" or "-h" or "/?" => PrintUsage(0),
                 _ => PrintUnknownArgument(args[0]),
             };
@@ -249,15 +251,22 @@ internal static class Program
 
         Console.WriteLine($"handedness: {pose.Handedness}");
         Console.WriteLine($"confidence: {pose.Confidence:0.000}");
-        Console.WriteLine($"scale     : {HandMetrics.Scale(pose):0.00} px");
-        Console.WriteLine($"openness  : {HandMetrics.Openness(pose):0.000}");
+        Console.WriteLine($"scale     : {HandMetrics.Scale(pose):0.00} px screen, "
+            + $"{HandMetrics.WorldScale(pose):0.0000} world");
+        Console.WriteLine($"openness  : {HandMetrics.Openness(pose):0.000} world, "
+            + $"{HandMetrics.ProjectedOpenness(pose):0.000} projected");
+        Console.WriteLine($"view align: {HandMetrics.ViewAxisAlignment(pose):0.000} "
+            + "(0 = flat to camera, 1 = pointing at it)");
         Console.WriteLine($"palm      : {HandMetrics.PalmCenter(pose).X:0.0}, {HandMetrics.PalmCenter(pose).Y:0.0}");
-        Console.WriteLine("landmarks :");
+        Console.WriteLine("landmarks : screen x y z | world x y z");
 
         for (int i = 0; i < HandPose.LandmarkCount; i++)
         {
             Vector3 point = pose.Landmarks[i];
-            Console.WriteLine($"  {i,2} {(HandLandmark)i,-10} {point.X,8:0.00} {point.Y,8:0.00} {point.Z,8:0.00}");
+            Vector3 world = pose.WorldLandmarks[i];
+            Console.WriteLine(
+                $"  {i,2} {(HandLandmark)i,-10} {point.X,8:0.00} {point.Y,8:0.00} {point.Z,7:0.00} | "
+                + $"{world.X,8:0.0000} {world.Y,8:0.0000} {world.Z,8:0.0000}");
         }
 
         return 0;
@@ -285,13 +294,17 @@ internal static class Program
             : devices.FirstOrDefault(d => d.Kind == CameraKind.Color) ?? devices[0];
 
         using IHandTracker tracker = OnnxHandTracker.Create();
-        var recognizer = new GestureRecognizer();
+        GestureOptions gestureOptions = GestureProfile.LoadOptionsOrDefault();
+        var recognizer = new GestureRecognizer(gestureOptions);
         var inferenceTime = new MovingAverage();
 
         int framesProcessed = 0;
         int framesWithHand = 0;
         int grabs = 0;
+        int blockedFrames = 0;
         float lastOpenness = 0;
+        float lastView = 0;
+        bool lastBlocked = false;
         var state = GestureState.NoHand;
 
         await using ICameraSource source = await enumerator.OpenAsync(device);
@@ -310,6 +323,13 @@ internal static class Program
             {
                 framesWithHand++;
                 lastOpenness = update.Openness;
+                lastView = update.ViewAlignment;
+                lastBlocked = update.IsArmingBlocked;
+
+                if (update.IsArmingBlocked)
+                {
+                    blockedFrames++;
+                }
             }
 
             if (update.GrabStarted)
@@ -325,6 +345,10 @@ internal static class Program
 
         Console.WriteLine($"device : {device.GroupName}");
         Console.WriteLine($"format : {source.ActiveFormat}");
+        Console.WriteLine($"grab   : below {gestureOptions.GrabOpenness:0.00}, "
+            + $"release above {gestureOptions.ReleaseOpenness:0.00}, "
+            + $"blocked above view {gestureOptions.MaxViewAxisAlignment:0.00}"
+            + (GestureProfile.Load() is null ? "  (defaults)" : "  (your profile)"));
         Console.WriteLine();
         Console.WriteLine($"Tracking for {seconds:0.#}s. Show a hand, then open and close it.");
         Console.WriteLine();
@@ -334,9 +358,10 @@ internal static class Program
         {
             await Task.Delay(500);
 
-            string line = $"  {state,-6} openness {lastOpenness,5:0.00}  "
+            string line = $"  {state,-6} openness {lastOpenness,5:0.00}  view {lastView,5:0.00}  "
                 + $"hand {(framesProcessed > 0 ? 100.0 * framesWithHand / framesProcessed : 0),5:0.0}%  "
-                + $"grabs {grabs}   ";
+                + $"grabs {grabs}"
+                + (lastBlocked ? "  [arming blocked]" : "                  ");
 
             // Overwrite in place on a console, but write plain lines when redirected —
             // carriage returns turn a captured log into one unreadable smear.
@@ -359,6 +384,7 @@ internal static class Program
         Console.WriteLine($"inference  : {inferenceTime.Value:0.0} ms mean, {inferenceTime.Max:0.0} ms worst");
         Console.WriteLine($"model runs : {tracker.DetectionRuns} detection, {tracker.TrackingRuns} tracking");
         Console.WriteLine($"grabs      : {grabs}");
+        Console.WriteLine($"blocked    : {blockedFrames} frames too foreshortened to arm");
 
         if (framesWithHand > 0 && tracker.DetectionRuns > tracker.TrackingRuns / 2)
         {
@@ -368,6 +394,140 @@ internal static class Program
         }
 
         return 0;
+    }
+
+    /// <summary>
+    /// Measures the user's own open, closed and camera-pointing hand, then fits grab
+    /// thresholds to the gap between them.
+    /// </summary>
+    /// <remarks>
+    /// The built-in defaults came from one measured hand. Hands differ enough that the
+    /// difference exceeds the gap between the grab and release thresholds, which is
+    /// exactly how a grab ends up neither committing nor letting go.
+    /// </remarks>
+    private static async Task<int> CalibrateGrabAsync(string[] args)
+    {
+        string? profilePath = args.Length > 1 ? args[1] : null;
+
+        var enumerator = new WindowsCameraEnumerator();
+        IReadOnlyList<CameraDeviceInfo> devices = await enumerator.EnumerateAsync();
+        if (devices.Count == 0)
+        {
+            Console.Error.WriteLine("No cameras found.");
+            return 2;
+        }
+
+        CameraDeviceInfo device = devices.FirstOrDefault(d => d.Kind == CameraKind.Color) ?? devices[0];
+
+        using IHandTracker tracker = OnnxHandTracker.Create();
+        await using ICameraSource source = await enumerator.OpenAsync(device);
+
+        CalibrationPhase? recording = null;
+        var gate = new object();
+
+        void OnFrameArrived(object? sender, FrameEventArgs e)
+        {
+            CalibrationPhase? phase;
+            lock (gate)
+            {
+                phase = recording;
+            }
+
+            HandPose? pose = tracker.Track(e.Frame);
+            if (phase is null || pose is null || pose.Confidence < 0.7f)
+            {
+                return;
+            }
+
+            lock (gate)
+            {
+                phase.Add(pose);
+            }
+        }
+
+        source.FrameArrived += OnFrameArrived;
+        await source.StartAsync();
+
+        Console.WriteLine("Grab calibration");
+        Console.WriteLine();
+        Console.WriteLine("Hold each pose about an arm's length from the camera until the bar fills.");
+        Console.WriteLine();
+
+        CalibrationPhase open = await RecordAsync("Hold your hand OPEN, palm flat toward the camera");
+        CalibrationPhase closed = await RecordAsync("CLOSE your hand into a fist, still facing the camera");
+        CalibrationPhase pointing = await RecordAsync("Now POINT your hand at the camera, fingers toward the lens");
+
+        await source.StopAsync();
+        source.FrameArrived -= OnFrameArrived;
+
+        Console.WriteLine();
+        Console.WriteLine("Measured openness:");
+        Console.WriteLine($"  open    : {GrabCalibration.Describe(open.Openness)}");
+        Console.WriteLine($"  closed  : {GrabCalibration.Describe(closed.Openness)}");
+        Console.WriteLine($"  pointing: {GrabCalibration.Describe(pointing.Openness)}");
+        Console.WriteLine();
+        Console.WriteLine("Measured view alignment:");
+        Console.WriteLine($"  facing  : {GrabCalibration.Describe([.. open.ViewAlignment, .. closed.ViewAlignment])}");
+        Console.WriteLine($"  pointing: {GrabCalibration.Describe(pointing.ViewAlignment)}");
+        Console.WriteLine();
+
+        (GestureProfile? profile, string? problem) = GrabCalibration.Fit(open, closed, pointing);
+
+        if (profile is null)
+        {
+            Console.Error.WriteLine(problem);
+            return 3;
+        }
+
+        profile.Save(profilePath);
+
+        Console.WriteLine("Fitted thresholds:");
+        Console.WriteLine($"  grab below   : {profile.GrabOpenness:0.00}");
+        Console.WriteLine($"  release above: {profile.ReleaseOpenness:0.00}");
+        Console.WriteLine($"  block arming above view alignment {profile.MaxViewAxisAlignment:0.00}");
+        Console.WriteLine();
+        Console.WriteLine($"Saved to {profilePath ?? GestureProfile.DefaultPath}");
+
+        return 0;
+
+        async Task<CalibrationPhase> RecordAsync(string prompt)
+        {
+            var phase = new CalibrationPhase(prompt, [], []);
+
+            Console.WriteLine(prompt);
+            for (int countdown = 3; countdown > 0; countdown--)
+            {
+                Console.Write($"\r  starting in {countdown}...   ");
+                await Task.Delay(1000);
+            }
+
+            lock (gate)
+            {
+                recording = phase;
+            }
+
+            const int steps = 20;
+            for (int step = 0; step < steps; step++)
+            {
+                await Task.Delay(150);
+                Console.Write($"\r  [{new string('#', step + 1)}{new string('.', steps - step - 1)}]   ");
+            }
+
+            lock (gate)
+            {
+                recording = null;
+            }
+
+            int samples;
+            lock (gate)
+            {
+                samples = phase.Openness.Count;
+            }
+
+            Console.WriteLine($"\r  [{new string('#', steps)}] {samples} frames captured");
+            Console.WriteLine();
+            return phase;
+        }
     }
 
     private static int PrintUsage(int exitCode)
@@ -380,6 +540,7 @@ internal static class Program
         Console.WriteLine("  --snap [path] [index]       save one frame uncompressed, for replay");
         Console.WriteLine("  --landmarks <path>          run the tracker over a saved frame");
         Console.WriteLine("  --track [seconds] [index]   track a hand live and report the cost");
+        Console.WriteLine("  --calibrate-grab [path]     fit grab thresholds to your own hand");
         Console.WriteLine();
         Console.WriteLine("Index comes from --list. Without one, the first colour camera is used.");
         return exitCode;

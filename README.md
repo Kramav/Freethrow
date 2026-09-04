@@ -19,9 +19,9 @@ Gaze is never asked for pixel accuracy, because a webcam cannot deliver it.
 ## Status
 
 **Milestone 1 — hand tracking and gestures.** Camera enumeration (colour and
-infrared), pooled-buffer capture, ONNX hand tracking, a debounced grab/release gesture
-machine, and a preview window drawing the skeleton live. No window control yet — that
-is M2.
+infrared), pooled-buffer capture, ONNX hand tracking, a grab/release gesture machine
+measured in metric 3D and gated on hand posture, per-person threshold calibration, and
+a preview window drawing the skeleton live. No window control yet — that is M2.
 
 ## Requirements
 
@@ -61,6 +61,9 @@ dotnet run --project demos\Freethrow.Demo.Preview -- --probe 0 5
 # Track a hand live and report what perception costs.
 dotnet run --project demos\Freethrow.Demo.Preview -- --track 10
 
+# Fit the grab thresholds to your own hand (recommended once).
+dotnet run --project demos\Freethrow.Demo.Preview -- --calibrate-grab
+
 # Save one frame uncompressed, then run the tracker over it.
 dotnet run --project demos\Freethrow.Demo.Preview -- --snap hand.ftraw
 dotnet run --project demos\Freethrow.Demo.Preview -- --landmarks hand.ftraw
@@ -97,11 +100,33 @@ is lost. In steady state that is one cheap inference per frame instead of two.
 The preview reports `runs N detect / M track`. If those numbers are close, the loop is
 thrashing rather than tracking.
 
+## How grabbing works
+
 Grab detection uses **openness** — mean fingertip-to-wrist distance divided by
 wrist-to-knuckle distance. Dividing by the hand's own size is what makes one threshold
-work at any distance from the camera. Separate grab and release thresholds stop it
-chattering, and a grab survives a short tracking dropout rather than dropping whatever
-it is carrying.
+work at any distance from the camera.
+
+Crucially it is measured on the model's **world landmarks**, which are metric and
+hand-relative, not on the projected pixel positions. A projected measurement cannot tell
+an open hand pointing at the camera from a fist — they are the same shape in a
+photograph — so a hand merely angled away used to register as a grab. Measured in three
+dimensions, rotating the hand does not change it; only closing the hand does.
+
+Two further rules make it behave:
+
+- **Arming is gated on posture.** If the hand's palm axis points along the camera's view
+  axis, the landmark model is guessing at the fingers, so no new grab may start and the
+  skeleton greys out to say so. Once a grab is *held*, orientation is ignored — a wrist
+  turns throughout a drag, and dropping the window then would be worse.
+- **Debouncing is in seconds and tolerates dropouts.** Contrary frames decay the
+  accumulated evidence instead of resetting it, so one bad landmark frame delays a
+  transition rather than cancelling it. The windows are durations, not frame counts,
+  because the tracking worker drops frames under load.
+
+Thresholds ship with defaults measured from one hand. Hands vary by more than the gap
+between the grab and release thresholds, so run `--calibrate-grab` once: it measures
+your open, closed and camera-pointing hand and fits the thresholds to the gap between
+them, biased toward releasing readily.
 
 ## Layout
 
@@ -112,6 +137,9 @@ src/Freethrow.Core       Platform-agnostic pipeline. Never references Win32 or W
   Gestures/              Grab/release state machine
   Filters/               One-euro smoothing
   Imaging/               Resampling frames into model tensors
+  Config/                Per-person calibration profiles
+tests/Freethrow.Core.Tests
+                         Gesture machine driven by synthetic poses, no camera needed
 src/Freethrow.Desktop    Windows integration: capture, and later windows and overlay.
 demos/                   Runnable demonstrations of each capability.
 models/                  ONNX models, downloaded rather than committed.

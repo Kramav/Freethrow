@@ -49,12 +49,27 @@ public readonly record struct RotatedCrop(Vector2 Center, float Side, float Rota
         float localX = (cropPoint.X - (Size / 2f)) * step;
         float localY = (cropPoint.Y - (Size / 2f)) * step;
 
+        return RotateToFrame(new Vector2(localX, localY)) + Center;
+    }
+
+    /// <summary>
+    /// Applies only this crop's rotation, without its translation or scale.
+    /// </summary>
+    /// <remarks>
+    /// Needed for the model's metric world landmarks. Those are already hand-relative
+    /// and already in metres, so translating or scaling them would be meaningless — but
+    /// they come out in the rotated crop's frame, so their axes still have to be turned
+    /// back to line up with the image before any direction taken from them means
+    /// anything.
+    /// </remarks>
+    public Vector2 RotateToFrame(Vector2 direction)
+    {
         float cos = MathF.Cos(Rotation);
         float sin = MathF.Sin(Rotation);
 
         return new Vector2(
-            Center.X + (cos * localX) - (sin * localY),
-            Center.Y + (sin * localX) + (cos * localY));
+            (cos * direction.X) - (sin * direction.Y),
+            (sin * direction.X) + (cos * direction.Y));
     }
 }
 

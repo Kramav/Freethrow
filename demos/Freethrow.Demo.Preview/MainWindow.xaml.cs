@@ -5,6 +5,7 @@ using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using Freethrow.Core.Capture;
+using Freethrow.Core.Config;
 using Freethrow.Core.Diagnostics;
 using Freethrow.Core.Gestures;
 using Freethrow.Core.Perception;
@@ -150,7 +151,14 @@ public partial class MainWindow : Window
         try
         {
             _tracker = OnnxHandTracker.Create();
-            _worker = new HandTrackingWorker(_tracker);
+
+            // Prefer thresholds fitted to this person's hand; the built-in defaults come
+            // from a single measured hand and hands vary more than the gap between the
+            // grab and release thresholds.
+            _worker = new HandTrackingWorker(
+                _tracker,
+                new GestureRecognizer(GestureProfile.LoadOptionsOrDefault()));
+
             _trackingUnavailable = null;
         }
         catch (FileNotFoundException ex)
@@ -236,6 +244,7 @@ public partial class MainWindow : Window
         Skeleton.Show(
             result?.Pose,
             result?.Gesture.State ?? GestureState.NoHand,
+            result?.Gesture.IsArmingBlocked ?? false,
             result?.FrameWidth ?? 0,
             result?.FrameHeight ?? 0);
     }
@@ -295,13 +304,21 @@ public partial class MainWindow : Window
         HandTrackingResult? result = worker.Latest;
         GestureUpdate gesture = result?.Gesture ?? default;
 
+        string note = gesture switch
+        {
+            { IsCoasting: true } => "   [coasting — hand lost, holding]",
+            { IsArmingBlocked: true } => "   [hand angled at camera — grab disabled]",
+            _ => string.Empty,
+        };
+
         StatusText.Text = capture + "\n"
             + $"{gesture.State,-6}  openness {gesture.Openness,5:0.00}  "
+            + $"view {gesture.ViewAlignment,5:0.00}  "
             + $"confidence {gesture.Confidence,5:0.00}  "
             + $"hand {worker.HandRate * 100,5:0.0}%  "
-            + $"inference {worker.InferenceMilliseconds,4:0.0} ms (max {worker.WorstInferenceMilliseconds:0.0})  "
+            + $"inference {worker.InferenceMilliseconds,4:0.0} ms  "
             + $"runs {tracker.DetectionRuns} detect / {tracker.TrackingRuns} track"
-            + (gesture.IsCoasting ? "   [coasting]" : string.Empty);
+            + note;
     }
 
     private async Task StopAsync()
@@ -324,7 +341,7 @@ public partial class MainWindow : Window
         _worker = null;
         _tracker?.Dispose();
         _tracker = null;
-        Skeleton.Show(null, GestureState.NoHand, 0, 0);
+        Skeleton.Show(null, GestureState.NoHand, isArmingBlocked: false, 0, 0);
 
         FrameRef? pending;
         lock (_pendingGate)

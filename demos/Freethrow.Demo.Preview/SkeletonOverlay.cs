@@ -18,21 +18,36 @@ public sealed class SkeletonOverlay : FrameworkElement
 {
     private static readonly Brush HoverBrush = Frozen(Color.FromRgb(0x4C, 0xC9, 0xF0));
     private static readonly Brush GrabBrush = Frozen(Color.FromRgb(0xF2, 0xA6, 0x5A));
+    private static readonly Brush BlockedBrush = Frozen(Color.FromRgb(0x6B, 0x72, 0x80));
     private static readonly Brush JointBrush = Frozen(Color.FromRgb(0xFF, 0xFF, 0xFF));
+    private static readonly Brush BlockedJointBrush = Frozen(Color.FromRgb(0x9C, 0xA3, 0xAF));
 
     private static readonly Pen HoverPen = FrozenPen(HoverBrush, 2.0);
     private static readonly Pen GrabPen = FrozenPen(GrabBrush, 3.0);
+    private static readonly Pen BlockedPen = FrozenPen(BlockedBrush, 1.5);
 
     private HandPose? _pose;
     private GestureState _state;
+    private bool _isArmingBlocked;
     private int _frameWidth;
     private int _frameHeight;
 
     /// <summary>Sets the hand to draw, or clears it when none is tracked.</summary>
-    public void Show(HandPose? pose, GestureState state, int frameWidth, int frameHeight)
+    /// <remarks>
+    /// <paramref name="isArmingBlocked"/> renders grey rather than blue. Without it, a
+    /// hand the system is deliberately refusing to act on looks identical to one it is
+    /// happily watching, and the refusal reads as the tracker being broken.
+    /// </remarks>
+    public void Show(
+        HandPose? pose,
+        GestureState state,
+        bool isArmingBlocked,
+        int frameWidth,
+        int frameHeight)
     {
         _pose = pose;
         _state = state;
+        _isArmingBlocked = isArmingBlocked;
         _frameWidth = frameWidth;
         _frameHeight = frameHeight;
         InvalidateVisual();
@@ -53,8 +68,10 @@ public sealed class SkeletonOverlay : FrameworkElement
         double offsetX = (ActualWidth - (_frameWidth * scale)) / 2;
         double offsetY = (ActualHeight - (_frameHeight * scale)) / 2;
 
-        Pen pen = _state == GestureState.Grab ? GrabPen : HoverPen;
-        double jointRadius = _state == GestureState.Grab ? 3.5 : 2.5;
+        bool held = _state == GestureState.Grab;
+        Pen pen = held ? GrabPen : _isArmingBlocked ? BlockedPen : HoverPen;
+        Brush jointBrush = !held && _isArmingBlocked ? BlockedJointBrush : JointBrush;
+        double jointRadius = held ? 3.5 : _isArmingBlocked ? 1.8 : 2.5;
 
         foreach ((HandLandmark from, HandLandmark to) in HandSkeleton.Bones)
         {
@@ -63,7 +80,7 @@ public sealed class SkeletonOverlay : FrameworkElement
 
         for (int i = 0; i < HandPose.LandmarkCount; i++)
         {
-            drawingContext.DrawEllipse(JointBrush, null, Map(_pose[(HandLandmark)i]), jointRadius, jointRadius);
+            drawingContext.DrawEllipse(jointBrush, null, Map(_pose[(HandLandmark)i]), jointRadius, jointRadius);
         }
 
         Point Map(Vector2 point) => new(
