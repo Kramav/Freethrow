@@ -1,6 +1,12 @@
+using System.Diagnostics;
+using System.IO;
+using System.Numerics;
 using System.Windows;
 using Freethrow.Core.Capture;
 using Freethrow.Core.Diagnostics;
+using Freethrow.Core.Gestures;
+using Freethrow.Core.Perception;
+using Freethrow.Core.Perception.Onnx;
 using Freethrow.Desktop.Capture;
 
 namespace Freethrow.Demo.Preview;
@@ -30,6 +36,9 @@ internal static class Program
             {
                 "--list" or "-l" => Task.Run(ListDevicesAsync).GetAwaiter().GetResult(),
                 "--probe" or "-p" => Task.Run(() => ProbeAsync(args)).GetAwaiter().GetResult(),
+                "--snap" or "-s" => Task.Run(() => SnapAsync(args)).GetAwaiter().GetResult(),
+                "--landmarks" => RunLandmarks(args),
+                "--track" or "-t" => Task.Run(() => TrackAsync(args)).GetAwaiter().GetResult(),
                 "--help" or "-h" or "/?" => PrintUsage(0),
                 _ => PrintUnknownArgument(args[0]),
             };
@@ -154,6 +163,213 @@ internal static class Program
         return 0;
     }
 
+    /// <summary>
+    /// Captures a single frame to an uncompressed file, so the exact pixels the pipeline
+    /// saw can be replayed or handed to a reference implementation for comparison.
+    /// </summary>
+    private static async Task<int> SnapAsync(string[] args)
+    {
+        string path = args.Length > 1 ? args[1] : "frame" + RawFrameFile.Extension;
+        int requestedIndex = args.Length > 2 && int.TryParse(args[2], out int parsed) ? parsed : -1;
+
+        var enumerator = new WindowsCameraEnumerator();
+        IReadOnlyList<CameraDeviceInfo> devices = await enumerator.EnumerateAsync();
+        if (devices.Count == 0)
+        {
+            Console.Error.WriteLine("No cameras found.");
+            return 2;
+        }
+
+        CameraDeviceInfo device = requestedIndex >= 0 && requestedIndex < devices.Count
+            ? devices[requestedIndex]
+            : devices.FirstOrDefault(d => d.Kind == CameraKind.Color) ?? devices[0];
+
+        await using ICameraSource source = await enumerator.OpenAsync(device);
+
+        var arrived = new TaskCompletionSource<FrameRef>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        void OnFrameArrived(object? sender, FrameEventArgs e)
+        {
+            // Skip the first few frames: cameras open with auto-exposure still settling,
+            // and a black or blown-out frame is a poor thing to test a tracker against.
+            if (e.Frame.Sequence >= 10)
+            {
+                arrived.TrySetResult(e.Frame.Retain());
+            }
+        }
+
+        source.FrameArrived += OnFrameArrived;
+        await source.StartAsync();
+
+        Task completed = await Task.WhenAny(arrived.Task, Task.Delay(TimeSpan.FromSeconds(10)));
+        await source.StopAsync();
+        source.FrameArrived -= OnFrameArrived;
+
+        if (completed != arrived.Task)
+        {
+            Console.Error.WriteLine("Timed out waiting for a frame.");
+            return 3;
+        }
+
+        using FrameRef frame = await arrived.Task;
+        RawFrameFile.Save(frame, path);
+
+        Console.WriteLine($"saved {frame.Width}x{frame.Height} {frame.Format} to {Path.GetFullPath(path)}");
+        return 0;
+    }
+
+    /// <summary>
+    /// Runs the tracker over a saved frame and prints every landmark, so the output can
+    /// be diffed against a reference implementation given the same input.
+    /// </summary>
+    private static int RunLandmarks(string[] args)
+    {
+        if (args.Length < 2)
+        {
+            Console.Error.WriteLine("Usage: --landmarks <file" + RawFrameFile.Extension + ">");
+            return 64;
+        }
+
+        using FrameRef frame = RawFrameFile.Load(args[1]);
+        using IHandTracker tracker = OnnxHandTracker.Create();
+
+        var stopwatch = Stopwatch.StartNew();
+        HandPose? pose = tracker.Track(frame);
+        stopwatch.Stop();
+
+        Console.WriteLine($"frame     : {frame.Width}x{frame.Height} {frame.Format}");
+        Console.WriteLine($"inference : {stopwatch.Elapsed.TotalMilliseconds:0.0} ms "
+            + $"({tracker.DetectionRuns} detection, {tracker.TrackingRuns} tracking)");
+
+        if (pose is null)
+        {
+            Console.WriteLine("result    : no hand detected");
+            return 3;
+        }
+
+        Console.WriteLine($"handedness: {pose.Handedness}");
+        Console.WriteLine($"confidence: {pose.Confidence:0.000}");
+        Console.WriteLine($"scale     : {HandMetrics.Scale(pose):0.00} px");
+        Console.WriteLine($"openness  : {HandMetrics.Openness(pose):0.000}");
+        Console.WriteLine($"palm      : {HandMetrics.PalmCenter(pose).X:0.0}, {HandMetrics.PalmCenter(pose).Y:0.0}");
+        Console.WriteLine("landmarks :");
+
+        for (int i = 0; i < HandPose.LandmarkCount; i++)
+        {
+            Vector3 point = pose.Landmarks[i];
+            Console.WriteLine($"  {i,2} {(HandLandmark)i,-10} {point.X,8:0.00} {point.Y,8:0.00} {point.Z,8:0.00}");
+        }
+
+        return 0;
+    }
+
+    /// <summary>
+    /// Tracks a hand from the live camera and reports how the perception budget is
+    /// actually being spent.
+    /// </summary>
+    private static async Task<int> TrackAsync(string[] args)
+    {
+        double seconds = args.Length > 1 && double.TryParse(args[1], out double parsed) ? parsed : 10;
+        int requestedIndex = args.Length > 2 && int.TryParse(args[2], out int index) ? index : -1;
+
+        var enumerator = new WindowsCameraEnumerator();
+        IReadOnlyList<CameraDeviceInfo> devices = await enumerator.EnumerateAsync();
+        if (devices.Count == 0)
+        {
+            Console.Error.WriteLine("No cameras found.");
+            return 2;
+        }
+
+        CameraDeviceInfo device = requestedIndex >= 0 && requestedIndex < devices.Count
+            ? devices[requestedIndex]
+            : devices.FirstOrDefault(d => d.Kind == CameraKind.Color) ?? devices[0];
+
+        using IHandTracker tracker = OnnxHandTracker.Create();
+        var recognizer = new GestureRecognizer();
+        var inferenceTime = new MovingAverage();
+
+        int framesProcessed = 0;
+        int framesWithHand = 0;
+        int grabs = 0;
+        float lastOpenness = 0;
+        var state = GestureState.NoHand;
+
+        await using ICameraSource source = await enumerator.OpenAsync(device);
+
+        void OnFrameArrived(object? sender, FrameEventArgs e)
+        {
+            long start = Stopwatch.GetTimestamp();
+            HandPose? pose = tracker.Track(e.Frame);
+            inferenceTime.Add((Stopwatch.GetTimestamp() - start) * 1000.0 / Stopwatch.Frequency);
+
+            double timestamp = e.Frame.CaptureTimestamp / (double)Stopwatch.Frequency;
+            GestureUpdate update = recognizer.Update(pose, timestamp);
+
+            framesProcessed++;
+            if (pose is not null)
+            {
+                framesWithHand++;
+                lastOpenness = update.Openness;
+            }
+
+            if (update.GrabStarted)
+            {
+                grabs++;
+            }
+
+            state = update.State;
+        }
+
+        source.FrameArrived += OnFrameArrived;
+        await source.StartAsync();
+
+        Console.WriteLine($"device : {device.GroupName}");
+        Console.WriteLine($"format : {source.ActiveFormat}");
+        Console.WriteLine();
+        Console.WriteLine($"Tracking for {seconds:0.#}s. Show a hand, then open and close it.");
+        Console.WriteLine();
+
+        var reportUntil = Stopwatch.StartNew();
+        while (reportUntil.Elapsed.TotalSeconds < seconds)
+        {
+            await Task.Delay(500);
+
+            string line = $"  {state,-6} openness {lastOpenness,5:0.00}  "
+                + $"hand {(framesProcessed > 0 ? 100.0 * framesWithHand / framesProcessed : 0),5:0.0}%  "
+                + $"grabs {grabs}   ";
+
+            // Overwrite in place on a console, but write plain lines when redirected —
+            // carriage returns turn a captured log into one unreadable smear.
+            if (Console.IsOutputRedirected)
+            {
+                Console.WriteLine(line);
+            }
+            else
+            {
+                Console.Write('\r' + line);
+            }
+        }
+
+        await source.StopAsync();
+        source.FrameArrived -= OnFrameArrived;
+
+        Console.WriteLine();
+        Console.WriteLine();
+        Console.WriteLine($"frames     : {framesProcessed} processed, {framesWithHand} with a hand");
+        Console.WriteLine($"inference  : {inferenceTime.Value:0.0} ms mean, {inferenceTime.Max:0.0} ms worst");
+        Console.WriteLine($"model runs : {tracker.DetectionRuns} detection, {tracker.TrackingRuns} tracking");
+        Console.WriteLine($"grabs      : {grabs}");
+
+        if (framesWithHand > 0 && tracker.DetectionRuns > tracker.TrackingRuns / 2)
+        {
+            Console.WriteLine();
+            Console.WriteLine("Note: detection ran nearly as often as tracking, so the tracking loop is "
+                + "not holding on to the hand. Expect higher CPU use than intended.");
+        }
+
+        return 0;
+    }
+
     private static int PrintUsage(int exitCode)
     {
         Console.WriteLine("Freethrow preview");
@@ -161,6 +377,9 @@ internal static class Program
         Console.WriteLine("  (no arguments)              open the preview window");
         Console.WriteLine("  --list                      list camera sources, infrared included");
         Console.WriteLine("  --probe [index] [seconds]   stream briefly and report capture health");
+        Console.WriteLine("  --snap [path] [index]       save one frame uncompressed, for replay");
+        Console.WriteLine("  --landmarks <path>          run the tracker over a saved frame");
+        Console.WriteLine("  --track [seconds] [index]   track a hand live and report the cost");
         Console.WriteLine();
         Console.WriteLine("Index comes from --list. Without one, the first colour camera is used.");
         return exitCode;

@@ -1,10 +1,14 @@
 using System.ComponentModel;
+using System.IO;
 using System.Windows;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using Freethrow.Core.Capture;
 using Freethrow.Core.Diagnostics;
+using Freethrow.Core.Gestures;
+using Freethrow.Core.Perception;
+using Freethrow.Core.Perception.Onnx;
 using Freethrow.Desktop.Capture;
 
 namespace Freethrow.Demo.Preview;
@@ -28,9 +32,12 @@ public partial class MainWindow : Window
     private readonly object _pendingGate = new();
 
     private ICameraSource? _source;
+    private IHandTracker? _tracker;
+    private HandTrackingWorker? _worker;
     private FrameRef? _pendingFrame;
     private WriteableBitmap? _bitmap;
     private bool _isStarting;
+    private string? _trackingUnavailable;
 
     public MainWindow()
     {
@@ -102,6 +109,8 @@ public partial class MainWindow : Window
 
         try
         {
+            StartTracking();
+
             ICameraSource source = await _enumerator.OpenAsync(device);
             source.FrameArrived += OnFrameArrived;
             await source.StartAsync();
@@ -128,8 +137,41 @@ public partial class MainWindow : Window
         }
     }
 
+    /// <summary>
+    /// Brings up hand tracking, or explains why it is unavailable.
+    /// </summary>
+    /// <remarks>
+    /// Missing models degrade the preview to plain video rather than preventing it from
+    /// opening: capture is worth checking on a machine even when the models have not
+    /// been downloaded yet.
+    /// </remarks>
+    private void StartTracking()
+    {
+        try
+        {
+            _tracker = OnnxHandTracker.Create();
+            _worker = new HandTrackingWorker(_tracker);
+            _trackingUnavailable = null;
+        }
+        catch (FileNotFoundException ex)
+        {
+            _trackingUnavailable = ex.Message;
+        }
+        catch (Exception ex)
+        {
+            _trackingUnavailable = $"Hand tracking failed to start: {ex.Message}";
+        }
+    }
+
     private void OnMirrorChanged(object sender, RoutedEventArgs e)
     {
+        // Fires during XAML parsing when IsChecked="True" is applied, which happens
+        // before the transform further down the tree has been assigned to its field.
+        if (MirrorTransform is null)
+        {
+            return;
+        }
+
         // Cameras face the user, so an unmirrored preview reverses every movement and
         // makes reaching toward a target feel wrong. Mirrored is the honest default.
         MirrorTransform.ScaleX = MirrorToggle.IsChecked == true ? -1 : 1;
@@ -143,6 +185,10 @@ public partial class MainWindow : Window
     {
         _captureRate.Tick();
         _latency.Add(e.Frame.AgeMilliseconds);
+
+        // The worker retains the frame itself if it wants it, and drops it if it is
+        // still busy — so a slow tracker never slows down capture or display.
+        _worker?.Submit(e.Frame);
 
         FrameRef retained = e.Frame.Retain();
         FrameRef? displaced;
@@ -182,6 +228,16 @@ public partial class MainWindow : Window
                 StatusText.Text = Describe(ex);
             }
         }
+
+        // Drawn from the latest available result rather than in step with inference:
+        // tracking runs slower than display, and the skeleton should simply persist on
+        // the frames between results instead of flickering.
+        HandTrackingResult? result = _worker?.Latest;
+        Skeleton.Show(
+            result?.Pose,
+            result?.Gesture.State ?? GestureState.NoHand,
+            result?.FrameWidth ?? 0,
+            result?.FrameHeight ?? 0);
     }
 
     private void Blit(FrameRef frame)
@@ -217,12 +273,35 @@ public partial class MainWindow : Window
             return;
         }
 
-        StatusText.Text =
-            $"{source.ActiveFormat}   capture {_captureRate.PerSecond,5:0.0} fps   "
-            + $"display {_renderRate.PerSecond,5:0.0} fps   "
-            + $"latency {_latency.Value,5:0.0} ms (max {_latency.Max:0.0})   "
-            + $"delivered {source.FramesDelivered}   dropped {source.FramesDropped}   "
-            + $"working set {Environment.WorkingSet / (1024.0 * 1024.0):0} MB";
+        string capture =
+            $"{source.ActiveFormat}  capture {_captureRate.PerSecond,5:0.0} fps  "
+            + $"display {_renderRate.PerSecond,5:0.0} fps  "
+            + $"latency {_latency.Value,4:0.0} ms  "
+            + $"dropped {source.FramesDropped}  "
+            + $"{Environment.WorkingSet / (1024.0 * 1024.0):0} MB";
+
+        if (_trackingUnavailable is { } unavailable)
+        {
+            StatusText.Text = $"{capture}\n{unavailable}";
+            return;
+        }
+
+        if (_worker is not { } worker || _tracker is not { } tracker)
+        {
+            StatusText.Text = capture;
+            return;
+        }
+
+        HandTrackingResult? result = worker.Latest;
+        GestureUpdate gesture = result?.Gesture ?? default;
+
+        StatusText.Text = capture + "\n"
+            + $"{gesture.State,-6}  openness {gesture.Openness,5:0.00}  "
+            + $"confidence {gesture.Confidence,5:0.00}  "
+            + $"hand {worker.HandRate * 100,5:0.0}%  "
+            + $"inference {worker.InferenceMilliseconds,4:0.0} ms (max {worker.WorstInferenceMilliseconds:0.0})  "
+            + $"runs {tracker.DetectionRuns} detect / {tracker.TrackingRuns} track"
+            + (gesture.IsCoasting ? "   [coasting]" : string.Empty);
     }
 
     private async Task StopAsync()
@@ -238,6 +317,14 @@ public partial class MainWindow : Window
             source.FrameArrived -= OnFrameArrived;
             await source.DisposeAsync();
         }
+
+        // Stop the worker before the tracker it borrows, or the last in-flight frame
+        // runs inference against a disposed ONNX session.
+        _worker?.Dispose();
+        _worker = null;
+        _tracker?.Dispose();
+        _tracker = null;
+        Skeleton.Show(null, GestureState.NoHand, 0, 0);
 
         FrameRef? pending;
         lock (_pendingGate)
