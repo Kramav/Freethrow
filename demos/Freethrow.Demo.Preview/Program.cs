@@ -241,18 +241,32 @@ internal static class Program
         using IHandTracker tracker = OnnxHandTracker.Create();
 
         var stopwatch = Stopwatch.StartNew();
-        HandPose? pose = tracker.Track(frame);
+        IReadOnlyList<TrackedHandPose> hands = tracker.Track(frame);
         stopwatch.Stop();
 
         Console.WriteLine($"frame     : {frame.Width}x{frame.Height} {frame.Format}");
         Console.WriteLine($"inference : {stopwatch.Elapsed.TotalMilliseconds:0.0} ms "
             + $"({tracker.DetectionRuns} detection, {tracker.TrackingRuns} tracking)");
+        Console.WriteLine($"hands     : {hands.Count}");
 
-        if (pose is null)
+        if (hands.Count == 0)
         {
             Console.WriteLine("result    : no hand detected");
             return 3;
         }
+
+        foreach ((int id, HandPose found) in hands)
+        {
+            Console.WriteLine();
+            Console.WriteLine($"hand {id}    : {found.Handedness}, confidence {found.Confidence:0.000}, "
+                + $"openness {HandMetrics.Openness(found):0.000}, "
+                + $"palm ({HandMetrics.PalmCenter(found).X:0}, {HandMetrics.PalmCenter(found).Y:0})");
+        }
+
+        Console.WriteLine();
+
+        // Full detail for the best hand only; the reference comparison diffs one hand.
+        HandPose pose = hands.OrderByDescending(hand => hand.Pose.Confidence).First().Pose;
 
         Console.WriteLine($"handedness: {pose.Handedness}");
         Console.WriteLine($"confidence: {pose.Confidence:0.000}");
@@ -300,51 +314,35 @@ internal static class Program
 
         using IHandTracker tracker = OnnxHandTracker.Create();
         GestureOptions gestureOptions = GestureProfile.LoadOptionsOrDefault();
-        var recognizer = new GestureRecognizer(gestureOptions);
-        var inferenceTime = new MovingAverage();
 
-        int framesProcessed = 0;
-        int framesWithHand = 0;
+        // Drives the same worker the preview does, so this reports the real multi-hand
+        // path including arbitration rather than a simplified stand-in.
+        using var worker = new HandTrackingWorker(tracker, gestureOptions);
+
         int grabs = 0;
-        int blockedFrames = 0;
-        float lastOpenness = 0;
-        float lastView = 0;
-        bool lastBlocked = false;
-        var state = GestureState.NoHand;
+        int twoHandFrames = 0;
 
-        await using ICameraSource source = await enumerator.OpenAsync(device);
-
-        void OnFrameArrived(object? sender, FrameEventArgs e)
+        void OnResult(object? sender, HandTrackingResult result)
         {
-            long start = Stopwatch.GetTimestamp();
-            HandPose? pose = tracker.Track(e.Frame);
-            inferenceTime.Add((Stopwatch.GetTimestamp() - start) * 1000.0 / Stopwatch.Frequency);
-
-            double timestamp = e.Frame.CaptureTimestamp / (double)Stopwatch.Frequency;
-            GestureUpdate update = recognizer.Update(pose, timestamp);
-
-            framesProcessed++;
-            if (pose is not null)
+            foreach (TrackedHand hand in result.Hands)
             {
-                framesWithHand++;
-                lastOpenness = update.Openness;
-                lastView = update.ViewAlignment;
-                lastBlocked = update.IsArmingBlocked;
-
-                if (update.IsArmingBlocked)
+                if (hand.Gesture.GrabStarted)
                 {
-                    blockedFrames++;
+                    grabs++;
                 }
             }
 
-            if (update.GrabStarted)
+            if (result.Hands.Count > 1)
             {
-                grabs++;
+                twoHandFrames++;
             }
-
-            state = update.State;
         }
 
+        await using ICameraSource source = await enumerator.OpenAsync(device);
+
+        void OnFrameArrived(object? sender, FrameEventArgs e) => worker.Submit(e.Frame);
+
+        worker.ResultAvailable += OnResult;
         source.FrameArrived += OnFrameArrived;
         await source.StartAsync();
 
@@ -355,7 +353,7 @@ internal static class Program
             + $"blocked above view {gestureOptions.MaxViewAxisAlignment:0.00}"
             + (GestureProfile.Load() is null ? "  (defaults)" : "  (your profile)"));
         Console.WriteLine();
-        Console.WriteLine($"Tracking for {seconds:0.#}s. Show a hand, then open and close it.");
+        Console.WriteLine($"Tracking for {seconds:0.#}s. Raise both hands, then grab with each in turn.");
         Console.WriteLine();
 
         var reportUntil = Stopwatch.StartNew();
@@ -363,10 +361,12 @@ internal static class Program
         {
             await Task.Delay(500);
 
-            string line = $"  {state,-6} openness {lastOpenness,5:0.00}  view {lastView,5:0.00}  "
-                + $"hand {(framesProcessed > 0 ? 100.0 * framesWithHand / framesProcessed : 0),5:0.0}%  "
-                + $"grabs {grabs}"
-                + (lastBlocked ? "  [arming blocked]" : "                  ");
+            HandTrackingResult? latest = worker.Latest;
+            string line = latest is null || latest.Hands.Count == 0
+                ? "  no hands                                             "
+                : "  " + string.Join("  ", latest.Hands.Select(hand =>
+                    $"[{hand.Id} {(hand.Id == latest.ControllingId ? "HOLD" : hand.Id == latest.HoverId ? "point" : "idle")}"
+                    + $" open {hand.Gesture.Openness:0.00} near {hand.DepthProxy:0}]"));
 
             // Overwrite in place on a console, but write plain lines when redirected —
             // carriage returns turn a captured log into one unreadable smear.
@@ -376,22 +376,24 @@ internal static class Program
             }
             else
             {
-                Console.Write('\r' + line);
+                Console.Write('\r' + line.PadRight(Math.Max(0, Console.WindowWidth - 1)));
             }
         }
 
         await source.StopAsync();
         source.FrameArrived -= OnFrameArrived;
+        worker.ResultAvailable -= OnResult;
 
         Console.WriteLine();
         Console.WriteLine();
-        Console.WriteLine($"frames     : {framesProcessed} processed, {framesWithHand} with a hand");
-        Console.WriteLine($"inference  : {inferenceTime.Value:0.0} ms mean, {inferenceTime.Max:0.0} ms worst");
+        Console.WriteLine($"frames     : {worker.FramesProcessed} processed, {worker.FramesWithHand} with a hand");
+        Console.WriteLine($"two hands  : {twoHandFrames} frames");
+        Console.WriteLine($"inference  : {worker.InferenceMilliseconds:0.0} ms mean, "
+            + $"{worker.WorstInferenceMilliseconds:0.0} ms worst");
         Console.WriteLine($"model runs : {tracker.DetectionRuns} detection, {tracker.TrackingRuns} tracking");
         Console.WriteLine($"grabs      : {grabs}");
-        Console.WriteLine($"blocked    : {blockedFrames} frames too foreshortened to arm");
 
-        if (framesWithHand > 0 && tracker.DetectionRuns > tracker.TrackingRuns / 2)
+        if (worker.FramesWithHand > 0 && tracker.DetectionRuns > tracker.TrackingRuns / 2)
         {
             Console.WriteLine();
             Console.WriteLine("Note: detection ran nearly as often as tracking, so the tracking loop is "

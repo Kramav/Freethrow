@@ -119,8 +119,11 @@ public partial class CalibrationWindow : Window
 
             _steps = BuildSteps(_monitor);
 
-            _tracker = OnnxHandTracker.Create();
-            _worker = new HandTrackingWorker(_tracker, new GestureRecognizer());
+            // One hand at a time: calibration measures a specific hand held in a specific
+            // pose, so a second hand wandering into frame could only confuse which one is
+            // being recorded.
+            _tracker = OnnxHandTracker.Create(new HandTrackerOptions { MaxHands = 1 });
+            _worker = new HandTrackingWorker(_tracker);
 
             IReadOnlyList<CameraDeviceInfo> devices = await _enumerator.EnumerateAsync();
             if (devices.Count == 0)
@@ -219,12 +222,19 @@ public partial class CalibrationWindow : Window
         }
 
         HandTrackingResult? result = _worker?.Latest;
-        Skeleton.Show(
-            result?.Pose,
-            result?.Gesture.State ?? GestureState.NoHand,
-            result?.Gesture.IsArmingBlocked ?? false,
-            result?.FrameWidth ?? 0,
-            result?.FrameHeight ?? 0);
+        TrackedHand? hand = result?.Primary;
+
+        if (result is null || hand is null)
+        {
+            Skeleton.Clear();
+        }
+        else
+        {
+            Skeleton.Show(
+                [new HandRender(hand.Pose, hand.Gesture.State, hand.Gesture.IsArmingBlocked, false, true)],
+                result.FrameWidth,
+                result.FrameHeight);
+        }
 
         Process(result);
     }
@@ -240,7 +250,8 @@ public partial class CalibrationWindow : Window
     /// </remarks>
     private void Process(HandTrackingResult? result)
     {
-        HandPose? pose = result?.Pose;
+        TrackedHand? hand = result?.Primary;
+        HandPose? pose = hand?.Pose;
         bool usable = pose is not null && pose.Confidence >= MinimumConfidence;
 
         Vector2 metric = usable && result is not null
@@ -258,7 +269,7 @@ public partial class CalibrationWindow : Window
 
         if (_mode == Mode.Capturing && usable)
         {
-            blocked = Record(metric, result!.Gesture.State);
+            blocked = Record(pose!, metric, hand!.Gesture.State);
             if (blocked is null && IsCurrentStepComplete())
             {
                 CompleteStep();
@@ -269,13 +280,12 @@ public partial class CalibrationWindow : Window
         UpdateReadouts(pose, usable, blocked);
     }
 
-    private string? Record(Vector2 metric, GestureState state)
+    private string? Record(HandPose pose, Vector2 metric, GestureState state)
     {
         switch (Current)
         {
             case PoseStep when _recordingPose is not null:
                 // Pose steps read the hand's shape, which needs no position at all.
-                HandPose pose = _worker!.Latest!.Pose!;
                 _recordingPose.Add(pose);
                 return null;
 
@@ -518,7 +528,7 @@ public partial class CalibrationWindow : Window
         _fittedGesture = profile;
 
         _worker?.Dispose();
-        _worker = new HandTrackingWorker(_tracker!, new GestureRecognizer(profile.ToOptions()));
+        _worker = new HandTrackingWorker(_tracker!, profile.ToOptions());
         return true;
     }
 

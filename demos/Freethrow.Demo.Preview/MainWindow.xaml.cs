@@ -155,9 +155,7 @@ public partial class MainWindow : Window
             // Prefer thresholds fitted to this person's hand; the built-in defaults come
             // from a single measured hand and hands vary more than the gap between the
             // grab and release thresholds.
-            _worker = new HandTrackingWorker(
-                _tracker,
-                new GestureRecognizer(GestureProfile.LoadOptionsOrDefault()));
+            _worker = new HandTrackingWorker(_tracker, GestureProfile.LoadOptionsOrDefault());
 
             _trackingUnavailable = null;
         }
@@ -241,12 +239,22 @@ public partial class MainWindow : Window
         // tracking runs slower than display, and the skeleton should simply persist on
         // the frames between results instead of flickering.
         HandTrackingResult? result = _worker?.Latest;
+
+        if (result is null)
+        {
+            Skeleton.Clear();
+            return;
+        }
+
         Skeleton.Show(
-            result?.Pose,
-            result?.Gesture.State ?? GestureState.NoHand,
-            result?.Gesture.IsArmingBlocked ?? false,
-            result?.FrameWidth ?? 0,
-            result?.FrameHeight ?? 0);
+            [.. result.Hands.Select(hand => new HandRender(
+                hand.Pose,
+                hand.Gesture.State,
+                hand.Gesture.IsArmingBlocked,
+                hand.Id == result.ControllingId,
+                hand.Id == result.HoverId))],
+            result.FrameWidth,
+            result.FrameHeight);
     }
 
     private void Blit(FrameRef frame)
@@ -302,23 +310,32 @@ public partial class MainWindow : Window
         }
 
         HandTrackingResult? result = worker.Latest;
-        GestureUpdate gesture = result?.Gesture ?? default;
 
-        string note = gesture switch
-        {
-            { IsCoasting: true } => "   [coasting — hand lost, holding]",
-            { IsArmingBlocked: true } => "   [hand angled at camera — grab disabled]",
-            _ => string.Empty,
-        };
+        string perHand = result is null || result.Hands.Count == 0
+            ? "no hands"
+            : string.Join("   ", result.Hands.Select(hand => Describe(hand, result)));
 
         StatusText.Text = capture + "\n"
-            + $"{gesture.State,-6}  openness {gesture.Openness,5:0.00}  "
-            + $"view {gesture.ViewAlignment,5:0.00}  "
-            + $"confidence {gesture.Confidence,5:0.00}  "
-            + $"hand {worker.HandRate * 100,5:0.0}%  "
+            + perHand + "\n"
+            + $"hands {result?.Hands.Count ?? 0}  "
+            + $"tracked {worker.HandRate * 100,5:0.0}%  "
             + $"inference {worker.InferenceMilliseconds,4:0.0} ms  "
-            + $"runs {tracker.DetectionRuns} detect / {tracker.TrackingRuns} track"
-            + note;
+            + $"runs {tracker.DetectionRuns} detect / {tracker.TrackingRuns} track";
+
+        static string Describe(TrackedHand hand, HandTrackingResult result)
+        {
+            // The role matters more than the raw numbers when two hands are up: it says
+            // which one the system is actually listening to.
+            string role = hand.Id == result.ControllingId ? "HOLDING"
+                : hand.Id == result.HoverId ? "pointing"
+                : hand.Gesture.IsArmingBlocked ? "blocked"
+                : "idle";
+
+            return $"[{hand.Id} {hand.Pose.Handedness,-5} {role,-8} "
+                + $"open {hand.Gesture.Openness,4:0.00} "
+                + $"view {hand.Gesture.ViewAlignment,4:0.00} "
+                + $"near {hand.DepthProxy,5:0}{(hand.Gesture.IsCoasting ? " coasting" : string.Empty)}]";
+        }
     }
 
     private async Task StopAsync()
@@ -341,7 +358,7 @@ public partial class MainWindow : Window
         _worker = null;
         _tracker?.Dispose();
         _tracker = null;
-        Skeleton.Show(null, GestureState.NoHand, isArmingBlocked: false, 0, 0);
+        Skeleton.Clear();
 
         FrameRef? pending;
         lock (_pendingGate)

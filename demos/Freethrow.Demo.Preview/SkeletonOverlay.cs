@@ -6,58 +6,63 @@ using Freethrow.Core.Perception;
 
 namespace Freethrow.Demo.Preview;
 
+/// <summary>One hand to draw, and what it is doing.</summary>
+/// <param name="Pose">Landmarks in frame pixels.</param>
+/// <param name="State">Gesture state for this hand.</param>
+/// <param name="IsArmingBlocked">Whether the pose is too foreshortened to start a grab.</param>
+/// <param name="IsControlling">Whether this hand holds the interaction.</param>
+/// <param name="IsHover">Whether this hand is designating a target.</param>
+public readonly record struct HandRender(
+    HandPose Pose,
+    GestureState State,
+    bool IsArmingBlocked,
+    bool IsControlling,
+    bool IsHover);
+
 /// <summary>
-/// Draws the tracked hand skeleton over the camera preview.
+/// Draws every tracked hand over the camera preview.
 /// </summary>
 /// <remarks>
-/// Colour carries the gesture state, because a number in a status bar is not something
-/// you can read while your hand is in the air. Watching the skeleton change colour as
-/// the hand closes is the fastest way to tell whether the grab thresholds are tuned.
+/// Colour carries the hand's role, because a number in a status bar is not something you
+/// can read while your hands are in the air. With two hands up it must be obvious at a
+/// glance which one the system is listening to — otherwise a hand that is being
+/// deliberately ignored looks identical to one that is broken.
 /// </remarks>
 public sealed class SkeletonOverlay : FrameworkElement
 {
     private static readonly Brush HoverBrush = Frozen(Color.FromRgb(0x4C, 0xC9, 0xF0));
     private static readonly Brush GrabBrush = Frozen(Color.FromRgb(0xF2, 0xA6, 0x5A));
     private static readonly Brush BlockedBrush = Frozen(Color.FromRgb(0x6B, 0x72, 0x80));
+    private static readonly Brush IdleBrush = Frozen(Color.FromArgb(0x88, 0x8B, 0x94, 0xA6));
     private static readonly Brush JointBrush = Frozen(Color.FromRgb(0xFF, 0xFF, 0xFF));
-    private static readonly Brush BlockedJointBrush = Frozen(Color.FromRgb(0x9C, 0xA3, 0xAF));
+    private static readonly Brush DimJointBrush = Frozen(Color.FromArgb(0x99, 0xC8, 0xD2, 0xE0));
 
     private static readonly Pen HoverPen = FrozenPen(HoverBrush, 2.0);
-    private static readonly Pen GrabPen = FrozenPen(GrabBrush, 3.0);
+    private static readonly Pen GrabPen = FrozenPen(GrabBrush, 3.5);
     private static readonly Pen BlockedPen = FrozenPen(BlockedBrush, 1.5);
+    private static readonly Pen IdlePen = FrozenPen(IdleBrush, 1.5);
 
-    private HandPose? _pose;
-    private GestureState _state;
-    private bool _isArmingBlocked;
+    private IReadOnlyList<HandRender> _hands = [];
     private int _frameWidth;
     private int _frameHeight;
 
-    /// <summary>Sets the hand to draw, or clears it when none is tracked.</summary>
-    /// <remarks>
-    /// <paramref name="isArmingBlocked"/> renders grey rather than blue. Without it, a
-    /// hand the system is deliberately refusing to act on looks identical to one it is
-    /// happily watching, and the refusal reads as the tracker being broken.
-    /// </remarks>
-    public void Show(
-        HandPose? pose,
-        GestureState state,
-        bool isArmingBlocked,
-        int frameWidth,
-        int frameHeight)
+    /// <summary>Sets the hands to draw, or clears them when none is tracked.</summary>
+    public void Show(IReadOnlyList<HandRender> hands, int frameWidth, int frameHeight)
     {
-        _pose = pose;
-        _state = state;
-        _isArmingBlocked = isArmingBlocked;
+        _hands = hands ?? [];
         _frameWidth = frameWidth;
         _frameHeight = frameHeight;
         InvalidateVisual();
     }
 
+    /// <summary>Clears the overlay.</summary>
+    public void Clear() => Show([], 0, 0);
+
     protected override void OnRender(DrawingContext drawingContext)
     {
         base.OnRender(drawingContext);
 
-        if (_pose is null || _frameWidth <= 0 || _frameHeight <= 0)
+        if (_hands.Count == 0 || _frameWidth <= 0 || _frameHeight <= 0)
         {
             return;
         }
@@ -68,19 +73,38 @@ public sealed class SkeletonOverlay : FrameworkElement
         double offsetX = (ActualWidth - (_frameWidth * scale)) / 2;
         double offsetY = (ActualHeight - (_frameHeight * scale)) / 2;
 
-        bool held = _state == GestureState.Grab;
-        Pen pen = held ? GrabPen : _isArmingBlocked ? BlockedPen : HoverPen;
-        Brush jointBrush = !held && _isArmingBlocked ? BlockedJointBrush : JointBrush;
-        double jointRadius = held ? 3.5 : _isArmingBlocked ? 1.8 : 2.5;
+        foreach (HandRender hand in _hands)
+        {
+            Draw(drawingContext, hand, scale, offsetX, offsetY);
+        }
+    }
+
+    private static void Draw(
+        DrawingContext drawingContext,
+        HandRender hand,
+        double scale,
+        double offsetX,
+        double offsetY)
+    {
+        // Held beats pointing beats blocked beats merely present. A hand that is tracked
+        // but not listened to is drawn faintly rather than not at all, so it is clear the
+        // system can see it and is choosing not to act on it.
+        (Pen pen, Brush joints, double radius) = hand switch
+        {
+            { IsControlling: true } => (GrabPen, JointBrush, 4.0),
+            { IsHover: true, IsArmingBlocked: false } => (HoverPen, JointBrush, 2.5),
+            { IsArmingBlocked: true } => (BlockedPen, DimJointBrush, 1.8),
+            _ => (IdlePen, DimJointBrush, 1.8),
+        };
 
         foreach ((HandLandmark from, HandLandmark to) in HandSkeleton.Bones)
         {
-            drawingContext.DrawLine(pen, Map(_pose[from]), Map(_pose[to]));
+            drawingContext.DrawLine(pen, Map(hand.Pose[from]), Map(hand.Pose[to]));
         }
 
         for (int i = 0; i < HandPose.LandmarkCount; i++)
         {
-            drawingContext.DrawEllipse(jointBrush, null, Map(_pose[(HandLandmark)i]), jointRadius, jointRadius);
+            drawingContext.DrawEllipse(joints, null, Map(hand.Pose[(HandLandmark)i]), radius, radius);
         }
 
         Point Map(Vector2 point) => new(
