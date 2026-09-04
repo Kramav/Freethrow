@@ -40,7 +40,8 @@ internal static class Program
                 "--snap" or "-s" => Task.Run(() => SnapAsync(args)).GetAwaiter().GetResult(),
                 "--landmarks" => RunLandmarks(args),
                 "--track" or "-t" => Task.Run(() => TrackAsync(args)).GetAwaiter().GetResult(),
-                "--calibrate-grab" or "-c" => Task.Run(() => CalibrateGrabAsync(args)).GetAwaiter().GetResult(),
+                // Runs on this STA thread rather than the pool: it opens a window.
+                "--calibrate-grab" or "-c" => RunCalibration(args),
                 "--help" or "-h" or "/?" => PrintUsage(0),
                 _ => PrintUnknownArgument(args[0]),
             };
@@ -397,137 +398,18 @@ internal static class Program
     }
 
     /// <summary>
-    /// Measures the user's own open, closed and camera-pointing hand, then fits grab
-    /// thresholds to the gap between them.
+    /// Opens the calibration window, which fits grab thresholds to the user's own hand.
     /// </summary>
     /// <remarks>
-    /// The built-in defaults came from one measured hand. Hands differ enough that the
-    /// difference exceeds the gap between the grab and release thresholds, which is
-    /// exactly how a grab ends up neither committing nor letting go.
+    /// The built-in defaults came from one measured hand. Hands differ by more than the
+    /// gap between the grab and release thresholds, which is exactly how a grab ends up
+    /// neither committing nor letting go.
     /// </remarks>
-    private static async Task<int> CalibrateGrabAsync(string[] args)
+    private static int RunCalibration(string[] args)
     {
         string? profilePath = args.Length > 1 ? args[1] : null;
-
-        var enumerator = new WindowsCameraEnumerator();
-        IReadOnlyList<CameraDeviceInfo> devices = await enumerator.EnumerateAsync();
-        if (devices.Count == 0)
-        {
-            Console.Error.WriteLine("No cameras found.");
-            return 2;
-        }
-
-        CameraDeviceInfo device = devices.FirstOrDefault(d => d.Kind == CameraKind.Color) ?? devices[0];
-
-        using IHandTracker tracker = OnnxHandTracker.Create();
-        await using ICameraSource source = await enumerator.OpenAsync(device);
-
-        CalibrationPhase? recording = null;
-        var gate = new object();
-
-        void OnFrameArrived(object? sender, FrameEventArgs e)
-        {
-            CalibrationPhase? phase;
-            lock (gate)
-            {
-                phase = recording;
-            }
-
-            HandPose? pose = tracker.Track(e.Frame);
-            if (phase is null || pose is null || pose.Confidence < 0.7f)
-            {
-                return;
-            }
-
-            lock (gate)
-            {
-                phase.Add(pose);
-            }
-        }
-
-        source.FrameArrived += OnFrameArrived;
-        await source.StartAsync();
-
-        Console.WriteLine("Grab calibration");
-        Console.WriteLine();
-        Console.WriteLine("Hold each pose about an arm's length from the camera until the bar fills.");
-        Console.WriteLine();
-
-        CalibrationPhase open = await RecordAsync("Hold your hand OPEN, palm flat toward the camera");
-        CalibrationPhase closed = await RecordAsync("CLOSE your hand into a fist, still facing the camera");
-        CalibrationPhase pointing = await RecordAsync("Now POINT your hand at the camera, fingers toward the lens");
-
-        await source.StopAsync();
-        source.FrameArrived -= OnFrameArrived;
-
-        Console.WriteLine();
-        Console.WriteLine("Measured openness:");
-        Console.WriteLine($"  open    : {GrabCalibration.Describe(open.Openness)}");
-        Console.WriteLine($"  closed  : {GrabCalibration.Describe(closed.Openness)}");
-        Console.WriteLine($"  pointing: {GrabCalibration.Describe(pointing.Openness)}");
-        Console.WriteLine();
-        Console.WriteLine("Measured view alignment:");
-        Console.WriteLine($"  facing  : {GrabCalibration.Describe([.. open.ViewAlignment, .. closed.ViewAlignment])}");
-        Console.WriteLine($"  pointing: {GrabCalibration.Describe(pointing.ViewAlignment)}");
-        Console.WriteLine();
-
-        (GestureProfile? profile, string? problem) = GrabCalibration.Fit(open, closed, pointing);
-
-        if (profile is null)
-        {
-            Console.Error.WriteLine(problem);
-            return 3;
-        }
-
-        profile.Save(profilePath);
-
-        Console.WriteLine("Fitted thresholds:");
-        Console.WriteLine($"  grab below   : {profile.GrabOpenness:0.00}");
-        Console.WriteLine($"  release above: {profile.ReleaseOpenness:0.00}");
-        Console.WriteLine($"  block arming above view alignment {profile.MaxViewAxisAlignment:0.00}");
-        Console.WriteLine();
-        Console.WriteLine($"Saved to {profilePath ?? GestureProfile.DefaultPath}");
-
-        return 0;
-
-        async Task<CalibrationPhase> RecordAsync(string prompt)
-        {
-            var phase = new CalibrationPhase(prompt, [], []);
-
-            Console.WriteLine(prompt);
-            for (int countdown = 3; countdown > 0; countdown--)
-            {
-                Console.Write($"\r  starting in {countdown}...   ");
-                await Task.Delay(1000);
-            }
-
-            lock (gate)
-            {
-                recording = phase;
-            }
-
-            const int steps = 20;
-            for (int step = 0; step < steps; step++)
-            {
-                await Task.Delay(150);
-                Console.Write($"\r  [{new string('#', step + 1)}{new string('.', steps - step - 1)}]   ");
-            }
-
-            lock (gate)
-            {
-                recording = null;
-            }
-
-            int samples;
-            lock (gate)
-            {
-                samples = phase.Openness.Count;
-            }
-
-            Console.WriteLine($"\r  [{new string('#', steps)}] {samples} frames captured");
-            Console.WriteLine();
-            return phase;
-        }
+        var application = new Application { ShutdownMode = ShutdownMode.OnMainWindowClose };
+        return application.Run(new CalibrationWindow(profilePath));
     }
 
     private static int PrintUsage(int exitCode)

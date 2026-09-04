@@ -61,7 +61,7 @@ dotnet run --project demos\Freethrow.Demo.Preview -- --probe 0 5
 # Track a hand live and report what perception costs.
 dotnet run --project demos\Freethrow.Demo.Preview -- --track 10
 
-# Fit the grab thresholds to your own hand (recommended once).
+# Fit the grab thresholds to your own hand (a window; recommended once).
 dotnet run --project demos\Freethrow.Demo.Preview -- --calibrate-grab
 
 # Save one frame uncompressed, then run the tracker over it.
@@ -124,9 +124,18 @@ Two further rules make it behave:
   because the tracking worker drops frames under load.
 
 Thresholds ship with defaults measured from one hand. Hands vary by more than the gap
-between the grab and release thresholds, so run `--calibrate-grab` once: it measures
-your open, closed and camera-pointing hand and fits the thresholds to the gap between
-them, biased toward releasing readily.
+between the grab and release thresholds, so run `--calibrate-grab` once.
+
+It opens a window showing the camera with your tracked hand drawn on it, and walks
+through three poses — open, closed, and pointing at the lens. Nothing starts until you
+press the button, there is no time limit, and the progress bar advances **only on frames
+where your hand is actually being tracked**, so if it stalls you can see why and fix your
+position. Any step can be redone. The fitted thresholds are shown before anything is
+saved.
+
+The measurement and the feedback are deliberately the same thing: what the bar counts is
+exactly what you see on screen. A calibration you perform blind, on a timer that starts
+without you, measures your fumbling rather than your hand.
 
 ## Layout
 

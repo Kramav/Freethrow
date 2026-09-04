@@ -1,4 +1,5 @@
 using Freethrow.Core.Config;
+using Freethrow.Core.Gestures;
 using Freethrow.Core.Perception;
 
 namespace Freethrow.Demo.Preview;
@@ -53,9 +54,21 @@ internal static class GrabCalibration
         CalibrationPhase closed,
         CalibrationPhase pointing)
     {
-        if (!open.HasEnoughSamples || !closed.HasEnoughSamples)
+        // Name the phase that failed. "Too few frames" on its own sends people looking at
+        // their lighting when the real answer is usually that one specific pose was not
+        // held where the camera could see it.
+        string[] missing =
+        [
+            .. new[] { open, closed }
+                .Where(phase => !phase.HasEnoughSamples)
+                .Select(phase => $"'{phase.Name}' ({phase.Openness.Count} frames)"),
+        ];
+
+        if (missing.Length > 0)
         {
-            return (null, "Too few frames with a hand in them. Try again in better light.");
+            return (null,
+                $"No hand was tracked for {string.Join(" or ", missing)}. Hold the pose about an "
+                + "arm's length away, fully inside the frame, and keep it still until the bar fills.");
         }
 
         // Use percentiles rather than extremes: a single bad landmark frame should not
@@ -98,13 +111,17 @@ internal static class GrabCalibration
         {
             // Without the pointing sample there is nothing to bound the far side, so keep
             // the default rather than inventing one from half the data.
-            return GestureProfile.LoadOptionsOrDefault().MaxViewAxisAlignment;
+            // The built-in default, deliberately not the stored profile: a fresh
+            // calibration must not silently inherit a value it failed to re-measure.
+            return GestureOptions.Default.MaxViewAxisAlignment;
         }
 
         float pointingLow = Percentile(pointing.ViewAlignment, 0.05f);
         if (pointingLow - flatHigh <= 0.1f)
         {
-            return GestureProfile.LoadOptionsOrDefault().MaxViewAxisAlignment;
+            // The built-in default, deliberately not the stored profile: a fresh
+            // calibration must not silently inherit a value it failed to re-measure.
+            return GestureOptions.Default.MaxViewAxisAlignment;
         }
 
         return flatHigh + ((pointingLow - flatHigh) * AlignmentFraction);
