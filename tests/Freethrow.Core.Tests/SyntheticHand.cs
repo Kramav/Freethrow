@@ -26,7 +26,21 @@ internal static class SyntheticHand
     /// Target alignment with the view axis, 0 (flat to the camera) to 1 (pointing at it).
     /// </param>
     /// <param name="confidence">Landmark confidence to report.</param>
-    public static HandPose Create(float openness, float viewAlignment = 0f, float confidence = 0.9f)
+    /// <param name="pixelsPerMetre">
+    /// Projection scale, which stands in for distance from the camera: a larger value is
+    /// a closer hand. Lets a test present the same physical hand at two depths.
+    /// </param>
+    /// <param name="offsetMetres">
+    /// Where the hand sits laterally, in metres from the frame centre. Applied to the
+    /// screen projection only — world landmarks stay hand-relative, as the model reports
+    /// them.
+    /// </param>
+    public static HandPose Create(
+        float openness,
+        float viewAlignment = 0f,
+        float confidence = 0.9f,
+        float pixelsPerMetre = 1000f,
+        Vector2 offsetMetres = default)
     {
         // Tilt the palm axis out of the image plane by exactly enough that its normalised
         // Z component equals the requested alignment.
@@ -63,7 +77,12 @@ internal static class SyntheticHand
                 world[i] = axis * (WorldScale * 0.5f);
             }
 
-            screen[i] = new Vector3(320 + (world[i].X * 1000), 240 + (world[i].Y * 1000), 0);
+            // Project onto a 640x480 frame. The offset moves the hand in the world; the
+            // scale is what changes when it moves toward or away from the camera.
+            screen[i] = new Vector3(
+                320 + ((world[i].X + offsetMetres.X) * pixelsPerMetre),
+                240 + ((world[i].Y + offsetMetres.Y) * pixelsPerMetre),
+                0);
         }
 
         return new HandPose(screen, world, Handedness.Right, confidence);

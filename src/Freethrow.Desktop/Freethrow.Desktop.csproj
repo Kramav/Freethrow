@@ -19,6 +19,11 @@
     <AssemblyName>Freethrow.Desktop</AssemblyName>
     <!-- Required to read locked SoftwareBitmap buffers without an extra copy per frame. -->
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!--
+      The on-screen overlays are WPF layered windows. This is the only UI in the library;
+      Freethrow.Core stays free of any presentation dependency.
+    -->
+    <UseWPF>true</UseWPF>
   </PropertyGroup>
 
   <ItemGroup>

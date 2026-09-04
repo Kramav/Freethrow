@@ -92,29 +92,48 @@
         </Grid>
 
         <!-- Actions -->
-        <StackPanel Grid.Row="3"
-                    Orientation="Horizontal"
-                    HorizontalAlignment="Right"
-                    Margin="0,14,0,0">
-            <TextBlock x:Name="StatusText"
-                       VerticalAlignment="Center"
-                       Margin="0,0,16,0"
-                       FontSize="12"
-                       Foreground="{StaticResource Muted}"
-                       Text="" />
+        <DockPanel Grid.Row="3" Margin="0,14,0,0" LastChildFill="False">
+
+            <StackPanel x:Name="ConfirmationPanel"
+                        DockPanel.Dock="Left"
+                        Orientation="Horizontal"
+                        VerticalAlignment="Center"
+                        Visibility="Collapsed">
+                <TextBlock Text="Confirm corners with"
+                           VerticalAlignment="Center"
+                           Margin="0,0,8,0"
+                           FontSize="12"
+                           Foreground="{StaticResource Muted}" />
+                <ComboBox x:Name="ConfirmationMode"
+                          Width="170"
+                          VerticalAlignment="Center"
+                          SelectionChanged="OnConfirmationModeChanged" />
+            </StackPanel>
+
+            <Button x:Name="PrimaryButton"
+                    DockPanel.Dock="Right"
+                    Content="Start capturing"
+                    Width="150"
+                    Padding="0,7"
+                    IsDefault="True"
+                    Click="OnPrimaryClick" />
+
             <Button x:Name="SecondaryButton"
+                    DockPanel.Dock="Right"
                     Content="Redo this step"
                     Width="130"
                     Padding="0,7"
                     Margin="0,0,10,0"
                     Visibility="Collapsed"
                     Click="OnSecondaryClick" />
-            <Button x:Name="PrimaryButton"
-                    Content="Start capturing"
-                    Width="150"
-                    Padding="0,7"
-                    IsDefault="True"
-                    Click="OnPrimaryClick" />
-        </StackPanel>
+
+            <TextBlock x:Name="StatusText"
+                       DockPanel.Dock="Right"
+                       VerticalAlignment="Center"
+                       Margin="0,0,16,0"
+                       FontSize="12"
+                       Foreground="{StaticResource Muted}"
+                       Text="" />
+        </DockPanel>
     </Grid>
 </Window>

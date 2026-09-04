@@ -9,6 +9,8 @@ using Freethrow.Core.Gestures;
 using Freethrow.Core.Perception;
 using Freethrow.Core.Perception.Onnx;
 using Freethrow.Desktop.Capture;
+using Freethrow.Desktop.Desktop;
+using Freethrow.Desktop.Overlay;
 
 namespace Freethrow.Demo.Preview;
 
@@ -36,6 +38,8 @@ internal static class Program
             return args[0].ToLowerInvariant() switch
             {
                 "--list" or "-l" => Task.Run(ListDevicesAsync).GetAwaiter().GetResult(),
+                "--monitors" or "-m" => ListMonitors(),
+                "--overlay" => ShowOverlay(args),
                 "--probe" or "-p" => Task.Run(() => ProbeAsync(args)).GetAwaiter().GetResult(),
                 "--snap" or "-s" => Task.Run(() => SnapAsync(args)).GetAwaiter().GetResult(),
                 "--landmarks" => RunLandmarks(args),
@@ -395,6 +399,115 @@ internal static class Program
         }
 
         return 0;
+    }
+
+    /// <summary>
+    /// Lists the attached displays and whether each has a spatial calibration.
+    /// </summary>
+    private static int ListMonitors()
+    {
+        IReadOnlyList<MonitorInfo> monitors = MonitorTopology.Enumerate();
+
+        if (monitors.Count == 0)
+        {
+            Console.Error.WriteLine("No monitors reported.");
+            return 2;
+        }
+
+        SpatialProfile? profile = SpatialProfile.Load();
+
+        Console.WriteLine($"{monitors.Count} monitor(s):");
+        foreach (MonitorInfo monitor in monitors)
+        {
+            MonitorMapping? mapping = profile?.Find(monitor.DeviceName);
+
+            Console.WriteLine($"  {monitor.DeviceName}  {monitor.Description}");
+            Console.WriteLine($"    bounds : {monitor.Width}x{monitor.Height} at ({monitor.Left}, {monitor.Top})");
+            Console.WriteLine($"    dpi    : {monitor.Dpi} (scale {monitor.ScaleFactor:0.##}x)"
+                + (monitor.IsPrimary ? "  primary" : string.Empty));
+            Console.WriteLine($"    mapping: {(mapping is null
+                ? "not calibrated"
+                : $"calibrated {mapping.CalibratedAt.LocalDateTime:yyyy-MM-dd HH:mm}")}");
+        }
+
+        if (profile is { MaxReachMin: { } min, MaxReachMax: { } max })
+        {
+            Console.WriteLine();
+            Console.WriteLine($"reach envelope: {(max.X - min.X) * 100:0} x {(max.Y - min.Y) * 100:0} cm");
+        }
+
+        return 0;
+    }
+
+    /// <summary>
+    /// Shows the calibration target overlay on each monitor in turn, then exits.
+    /// </summary>
+    /// <remarks>
+    /// Overlay placement is the most fragile platform code here: the window is positioned
+    /// in physical pixels while WPF draws in device-independent units, and a mixed-DPI
+    /// desktop has no single scale factor that satisfies both. This makes that verifiable
+    /// on its own, without walking through a whole calibration to reach it.
+    /// </remarks>
+    private static int ShowOverlay(string[] args)
+    {
+        double seconds = args.Length > 1 && double.TryParse(args[1], out double parsed) ? parsed : 4;
+
+        IReadOnlyList<MonitorInfo> monitors = MonitorTopology.Enumerate();
+        if (monitors.Count == 0)
+        {
+            Console.Error.WriteLine("No monitors reported.");
+            return 2;
+        }
+
+        var application = new Application { ShutdownMode = ShutdownMode.OnExplicitShutdown };
+        var overlay = new CalibrationTargetOverlay();
+
+        int index = 0;
+        var timer = new System.Windows.Threading.DispatcherTimer
+        {
+            Interval = TimeSpan.FromSeconds(seconds),
+        };
+
+        void ShowNext()
+        {
+            if (index >= monitors.Count)
+            {
+                timer.Stop();
+                overlay.Close();
+                application.Shutdown();
+                return;
+            }
+
+            MonitorInfo monitor = monitors[index++];
+            Console.WriteLine($"showing on {monitor.DeviceName} ({monitor.Width}x{monitor.Height} "
+                + $"at {monitor.Left},{monitor.Top}, {monitor.Dpi} DPI)");
+
+            overlay.ShowOn(monitor);
+            overlay.SetShowAllCorners(true);
+            overlay.SetTarget(index - 1 < 4 ? index - 1 : 0);
+            overlay.SetPointer(new Vector2(0.5f, 0.5f));
+            overlay.SetCaption($"{monitor.Description}\nmarkers should sit just inside each corner");
+
+            overlay.Dispatcher.BeginInvoke(
+                System.Windows.Threading.DispatcherPriority.Loaded,
+                () =>
+                {
+                    DpiScale dpi = System.Windows.Media.VisualTreeHelper.GetDpi(overlay);
+                    Console.WriteLine($"  wpf dpi scale : {dpi.DpiScaleX:0.###}");
+                    Console.WriteLine($"  window size   : {overlay.ActualWidth:0} x {overlay.ActualHeight:0} DIP");
+                    Console.WriteLine($"  expected      : {monitor.Width / (monitor.Dpi / 96.0):0} x "
+                        + $"{monitor.Height / (monitor.Dpi / 96.0):0} DIP");
+                });
+        }
+
+        timer.Tick += (_, _) => ShowNext();
+        application.Startup += (_, _) =>
+        {
+            ShowNext();
+            timer.Start();
+        };
+
+        return application.Run();
     }
 
     /// <summary>

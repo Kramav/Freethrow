@@ -61,8 +61,14 @@ dotnet run --project demos\Freethrow.Demo.Preview -- --probe 0 5
 # Track a hand live and report what perception costs.
 dotnet run --project demos\Freethrow.Demo.Preview -- --track 10
 
-# Fit the grab thresholds to your own hand (a window; recommended once).
+# Calibrate to your own hand (a window; recommended once).
 dotnet run --project demos\Freethrow.Demo.Preview -- --calibrate-grab
+
+# List displays and whether each has a mapping.
+dotnet run --project demos\Freethrow.Demo.Preview -- --monitors
+
+# Show the calibration target overlay on each display, to check placement.
+dotnet run --project demos\Freethrow.Demo.Preview -- --overlay
 
 # Save one frame uncompressed, then run the tracker over it.
 dotnet run --project demos\Freethrow.Demo.Preview -- --snap hand.ftraw
@@ -136,6 +142,38 @@ saved.
 The measurement and the feedback are deliberately the same thing: what the bar counts is
 exactly what you see on screen. A calibration you perform blind, on a timer that starts
 without you, measures your fumbling rather than your hand.
+
+## Where your hand is, in metres
+
+Knowing a hand is closed says nothing about *what* it is closing on. The second half of
+calibration traces your working area: rest your arm where it naturally sits, then reach
+to four markers drawn on the actual screen corners. Those four correspondences fit a
+homography — not a scale-and-offset, because the camera is not square-on to the plane
+your hand sweeps, so the mapping has real keystone in it.
+
+Reach only as far as stays **comfortable**. That envelope becomes the whole screen, so
+the corners end up reachable with a relaxed arm rather than at full extension. A separate
+one-off sweep records your maximum reach, used purely as headroom so overshooting past a
+screen edge keeps tracking instead of clamping dead.
+
+Positions are measured in **metres, not pixels**. The hand carries its own ruler:
+`HandMetrics.Scale` measures the palm in pixels, `WorldScale` measures the same span in
+metres, and their ratio is the projection's scale at whatever distance the hand happens
+to be. Divide by it and the result no longer changes when you lean toward the screen —
+which matters doubly because reaching for a far corner extends the arm, so the four
+corners are not even captured at the same depth. No camera intrinsics required; the hand
+is always in shot.
+
+Monitors are calibrated separately, because turning toward a side display also turns your
+body and moves where your hand rests. Mappings are keyed by display device name rather
+than by index or position, so unplugging or rearranging a monitor does not silently
+apply the wrong one.
+
+Corners can be confirmed three ways, selectable in the wizard: **grab and hold** (also
+proves a grab can arm out at the extremes, where the wrist is most rotated and the
+posture gate most likely to refuse), **hover and hold still**, or **press and hold
+space**. After fitting, *Test the mapping* shows a live dot over the targets — reaching
+toward a corner should put the dot on it, and leaning in and out should not move it.
 
 ## Layout
 
