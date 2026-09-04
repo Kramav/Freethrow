@@ -393,11 +393,20 @@ internal static class Program
         Console.WriteLine($"model runs : {tracker.DetectionRuns} detection, {tracker.TrackingRuns} tracking");
         Console.WriteLine($"grabs      : {grabs}");
 
-        if (worker.FramesWithHand > 0 && tracker.DetectionRuns > tracker.TrackingRuns / 2)
+        // Frames with no hand at all legitimately run the detector every time — there is
+        // nothing else to do. Only detections beyond those indicate a tracking loop that
+        // is losing its grip, so subtract them before judging.
+        long unavoidable = worker.FramesProcessed - worker.FramesWithHand;
+        long whileTracking = Math.Max(0, tracker.DetectionRuns - unavoidable);
+
+        Console.WriteLine($"detections : {unavoidable} unavoidable (no hand in frame), "
+            + $"{whileTracking} while tracking");
+
+        if (worker.FramesWithHand > 30 && whileTracking > worker.FramesWithHand / 2)
         {
             Console.WriteLine();
-            Console.WriteLine("Note: detection ran nearly as often as tracking, so the tracking loop is "
-                + "not holding on to the hand. Expect higher CPU use than intended.");
+            Console.WriteLine("Note: the detector ran often even while a hand was tracked, so the tracking "
+                + "loop is losing its grip rather than following. Expect higher CPU use than intended.");
         }
 
         return 0;

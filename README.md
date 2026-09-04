@@ -18,10 +18,11 @@ Gaze is never asked for pixel accuracy, because a webcam cannot deliver it.
 
 ## Status
 
-**Milestone 1 — hand tracking and gestures.** Camera enumeration (colour and
-infrared), pooled-buffer capture, ONNX hand tracking, a grab/release gesture machine
-measured in metric 3D and gated on hand posture, per-person threshold calibration, and
-a preview window drawing the skeleton live. No window control yet — that is M2.
+**Milestone 1 — hand tracking, gestures and calibration.** Camera enumeration (colour
+and infrared), pooled-buffer capture, ONNX tracking of **both hands** with
+grab-first-wins arbitration, a grab/release gesture machine measured in metric 3D and
+gated on hand posture, and per-person calibration of both the grab thresholds and the
+hand-to-screen mapping. No window control yet — that is M2.
 
 ## Requirements
 
@@ -142,6 +143,34 @@ saved.
 The measurement and the feedback are deliberately the same thing: what the bar counts is
 exactly what you see on screen. A calibration you perform blind, on a timer that starts
 without you, measures your fumbling rather than your hand.
+
+## Two hands
+
+Both hands are tracked by default, and **control is claimed by grabbing, not by
+arriving**. Previously whichever hand the detector happened to find first owned the
+interaction, so a deliberate grab with the other hand did nothing until the first left
+the frame — detection order decided control, which is an accident of where the detector
+looked.
+
+Now neither hand controls anything until one closes. That hand keeps the interaction
+until it opens, and a grab from the other is ignored meanwhile: mid-drag is the worst
+possible moment to change which hand is driving. The preview colours each hand by role,
+so it is obvious at a glance which one is being listened to and which is being
+deliberately ignored.
+
+When neither hand is grabbing, the **hand nearest the monitor** does the pointing — the
+one you reach out with is the one you mean. Nearness comes from the same pixels-per-metre
+figure the mapping uses, and a switching margin stops two hands at similar distance from
+trading the highlight back and forth.
+
+Cost is kept down by *when* the detector runs: every frame when nothing is tracked, a few
+times a second when a slot is free, and never when both hands are found. `--track`
+reports `detections: N unavoidable, M while tracking` so the two cases stay separable.
+Set `MaxHands = 1` in `HandTrackerOptions` to go back to one hand.
+
+Handedness is reported but **nothing depends on it** — the model labels both hands in
+MediaPipe's own two-hand sample image as "Right", so it is not trustworthy enough to
+arbitrate with.
 
 ## Where your hand is, in metres
 
