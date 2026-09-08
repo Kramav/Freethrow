@@ -229,6 +229,16 @@ fixtures with no camera and no desktop attached.
 The platform layer is called `Desktop` rather than `Windows` because a namespace
 ending in `.Windows` shadows WinRT's own `Windows` root and breaks `Windows.Media.Capture`.
 
+## Working on this
+
+- [CLAUDE.md](CLAUDE.md) — orientation for a new session on a new machine: setup, commands,
+  conventions, the gotchas that cost real debugging time, and what is still unverified.
+- [docs/PLAN.md](docs/PLAN.md) — the design record. Most obvious alternatives were considered
+  and rejected there with reasons; worth reading before changing the architecture.
+- [tools/reference-check/](tools/reference-check/) — regression check of the hand tracking
+  against OpenCV's implementation on identical input. Run it after any change to landmark
+  geometry, which otherwise fails in ways that still look like a plausible hand.
+
 ## Licence
 
 AGPL-3.0-or-later. See [LICENSE](LICENSE).
