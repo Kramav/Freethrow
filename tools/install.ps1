@@ -50,18 +50,26 @@ $models = @(
 )
 
 function Test-DotnetSdk {
-    $dotnet = Get-Command dotnet -ErrorAction SilentlyContinue
-    if (-not $dotnet) {
-        throw "The .NET SDK is not installed. Install it with 'winget install Microsoft.DotNet.SDK.8' and run this script again."
+    # `dotnet` on PATH is not proof of an SDK. Any machine with a .NET app on it has
+    # the runtime-only host, whose `dotnet --version` prints a paragraph and returns
+    # nothing -- which used to surface as "cannot call a method on a null-valued
+    # expression" instead of the install hint below. --list-sdks prints one line per
+    # SDK ("8.0.404 [C:\Program Files\dotnet\sdk]") and nothing when there are none.
+    $sdks = @()
+    if (Get-Command dotnet -ErrorAction SilentlyContinue) {
+        $sdks = @(& dotnet --list-sdks | Where-Object { $_ -match '^\d+\.' })
+    }
+    if ($sdks.Count -eq 0) {
+        throw "The .NET SDK is not installed (a .NET runtime alone cannot build). Install it with 'winget install Microsoft.DotNet.SDK.8', open a new terminal, and run this script again."
     }
 
-    $version = (& dotnet --version).Trim()
-    $major = [int]($version -split '\.')[0]
+    $newest = ($sdks[-1] -split ' ')[0]
+    $major = ($sdks | ForEach-Object { [int](($_ -split '\.')[0]) } | Measure-Object -Maximum).Maximum
     if ($major -lt 8) {
-        throw "Freethrow needs .NET SDK 8 or later; found $version."
+        throw "Freethrow needs .NET SDK 8 or later; found $newest."
     }
 
-    Write-Host "  .NET SDK $version" -ForegroundColor DarkGray
+    Write-Host "  .NET SDK $newest" -ForegroundColor DarkGray
 }
 
 function Install-Model {

@@ -134,7 +134,9 @@ and the hand→screen homography already exist (pulled forward during M1.6).
 
 ## Known unverified
 
-Be honest about these rather than assuming they work:
+Be honest about these rather than assuming they work. The first three need a person and a
+webcam; [docs/hardware-checks.md](docs/hardware-checks.md) is the runbook, with pass criteria.
+Do them before M2.
 
 - **The two-hand path has never been tested with two real hands.** It is correct on a static
   two-hand image (`--landmarks` reports `hands: 2`) and the arbitration logic is covered by

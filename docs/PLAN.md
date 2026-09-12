@@ -307,7 +307,7 @@ Targets: ≥25 FPS engaged end to end; <60 ms hand-motion-to-window-motion laten
 
     | Window | Resolve to | Send |
     |---|---|---|
-    | Browser | URL — UI Automation on the address bar (fragile across versions, unverified) or CrossDrop's planned tab extension | `navigate`. Logins do not travel; the kiosk has its own profile |
+    | Browser | URL — **built on CrossDrop's side:** its extension's Freethrow switch PUTs every window's active tab to `127.0.0.1:47800/crossdrop/windows`. Freethrow hosts that listener and matches an `HWND` by bounds, then title. Contract, and the listener's Origin rule: CrossDrop `extension/README.md`. UI Automation on the address bar stays the fallback (fragile, unverified) | `navigate`. Logins do not travel; the kiosk has its own profile |
     | Explorer | selected file, via `Shell.Application` COM — reliable | `upload` |
     | Word / PowerPoint / Excel | `ActiveDocument.FullName` via COM, **exported to PDF here** (`ExportAsFixedFormat`) | `upload` the PDF |
     | Single-document apps (PDF reader, image viewer, media player) | file path from the process command line; fails for tabbed and multi-document apps, which expose only a title | `upload`; over 25 MB, serve it from this PC on the tailnet and `navigate` to it (the PC must stay on while it plays) |

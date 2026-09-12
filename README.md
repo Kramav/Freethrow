@@ -233,6 +233,8 @@ ending in `.Windows` shadows WinRT's own `Windows` root and breaks `Windows.Medi
 
 - [CLAUDE.md](CLAUDE.md) — orientation for a new session on a new machine: setup, commands,
   conventions, the gotchas that cost real debugging time, and what is still unverified.
+- [docs/hardware-checks.md](docs/hardware-checks.md) — the webcam checks still owed before M2,
+  as a runbook with pass criteria.
 - [docs/PLAN.md](docs/PLAN.md) — the design record. Most obvious alternatives were considered
   and rejected there with reasons; worth reading before changing the architecture.
 - [tools/reference-check/](tools/reference-check/) — regression check of the hand tracking
