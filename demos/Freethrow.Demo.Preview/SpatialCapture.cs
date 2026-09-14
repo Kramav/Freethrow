@@ -48,8 +48,34 @@ internal sealed class PointCapture(CornerConfirmation mode, int target = 20)
 
     public double Progress => Math.Min(1.0, _samples.Count / (double)Target);
 
+    /// <summary>
+    /// Every frame border the hand touched during the run that was kept.
+    /// </summary>
+    /// <remarks>
+    /// Not a reason to refuse the corner: the palm centre can still be sound when a
+    /// fingertip is off-frame. But a corner at the camera's edge may be where the camera
+    /// stopped seeing rather than where the hand stopped, which the results should say.
+    /// </remarks>
+    public FrameEdge EdgeContact { get; private set; }
+
     /// <summary>Offers one frame. Returns why it was not accepted, or null if it was.</summary>
-    public string? Offer(Vector2 metric, GestureState state, bool keyHeld)
+    public string? Offer(Vector2 metric, FrameEdge edges, GestureState state, bool keyHeld)
+    {
+        string? refused = Accept(metric, state, keyHeld);
+
+        if (refused is null)
+        {
+            EdgeContact |= edges;
+        }
+        else
+        {
+            EdgeContact = FrameEdge.None;
+        }
+
+        return refused;
+    }
+
+    private string? Accept(Vector2 metric, GestureState state, bool keyHeld)
     {
         switch (Mode)
         {
@@ -88,6 +114,7 @@ internal sealed class PointCapture(CornerConfirmation mode, int target = 20)
     {
         _samples.Clear();
         _anchor = null;
+        EdgeContact = FrameEdge.None;
     }
 
     private static float Median(float[] values)
@@ -130,8 +157,42 @@ internal sealed class SweepCapture(int target = 90)
 
     public double Progress => Math.Min(1.0, Count / (double)Target);
 
-    public void Offer(Vector2 metric)
+    /// <summary>
+    /// Sides where the envelope's bound was set by a hand at the edge of the camera's view.
+    /// </summary>
+    /// <remarks>
+    /// A sweep that runs off the side of the frame records the camera's limit on that
+    /// side, not the arm's, and looks exactly like a genuine reach in the numbers. Only
+    /// the frame that set a bound decides it: touching an edge somewhere mid-sweep says
+    /// nothing about the extremes.
+    /// </remarks>
+    public FrameEdge ClippedSides { get; private set; }
+
+    public void Offer(Vector2 metric, FrameEdge edges)
     {
+        // Frame and metric axes point the same way (metric is pixels minus the frame
+        // centre, divided by a positive scale), so a new minimum X is a leftward extreme
+        // in camera terms.
+        if (metric.X < _min.X)
+        {
+            ClippedSides = Flag(ClippedSides, FrameEdge.Left, edges);
+        }
+
+        if (metric.X > _max.X)
+        {
+            ClippedSides = Flag(ClippedSides, FrameEdge.Right, edges);
+        }
+
+        if (metric.Y < _min.Y)
+        {
+            ClippedSides = Flag(ClippedSides, FrameEdge.Top, edges);
+        }
+
+        if (metric.Y > _max.Y)
+        {
+            ClippedSides = Flag(ClippedSides, FrameEdge.Bottom, edges);
+        }
+
         _min = Vector2.Min(_min, metric);
         _max = Vector2.Max(_max, metric);
         Count++;
@@ -142,7 +203,36 @@ internal sealed class SweepCapture(int target = 90)
         _min = new Vector2(float.MaxValue);
         _max = new Vector2(float.MinValue);
         Count = 0;
+        ClippedSides = FrameEdge.None;
     }
+
+    /// <summary>Sets or clears <paramref name="side"/> according to the frame that just extended it.</summary>
+    private static FrameEdge Flag(FrameEdge current, FrameEdge side, FrameEdge touched) =>
+        (touched & side) != 0 ? current | side : current & ~side;
+}
+
+/// <summary>
+/// Records where the hands sit at rest, with no stillness or gesture required.
+/// </summary>
+/// <remarks>
+/// Not a <see cref="PointCapture"/>: that restarts whenever the hand drifts, and a resting
+/// hand fidgets. Resting is the one thing the user is not asked to do precisely.
+/// </remarks>
+internal sealed class IdleCapture(int target = 60)
+{
+    private readonly List<Vector2> _samples = [];
+
+    public int Count => _samples.Count;
+
+    public int Target { get; } = target;
+
+    public bool IsComplete => _samples.Count >= Target;
+
+    public double Progress => Math.Min(1.0, _samples.Count / (double)Target);
+
+    public void Offer(Vector2 metric) => _samples.Add(metric);
+
+    public IdleZone Result => IdleZone.Fit(_samples);
 }
 
 /// <summary>Turns captured corners into a stored monitor mapping.</summary>
@@ -152,11 +242,11 @@ internal static class SpatialCalibration
     /// Fits the transform taking the four captured hand positions onto the monitor.
     /// </summary>
     /// <param name="corners">Captured positions in metres: top-left, top-right, bottom-right, bottom-left.</param>
-    /// <param name="neutralRest">Where the hand rests, in metres.</param>
+    /// <param name="idle">Where the hands rest, or null if they rest out of frame.</param>
     /// <param name="monitor">The monitor being mapped.</param>
     public static (MonitorMapping? Mapping, string? Problem) Fit(
         IReadOnlyList<Vector2> corners,
-        Vector2 neutralRest,
+        IdleZone? idle,
         MonitorInfo monitor)
     {
         ArgumentNullException.ThrowIfNull(corners);
@@ -182,7 +272,7 @@ internal static class SpatialCalibration
             monitor.DeviceName,
             monitor.Description,
             transform.ToArray(),
-            Point2.From(neutralRest),
+            idle,
             [.. corners.Select(Point2.From)],
             monitor.Width,
             monitor.Height,
@@ -190,28 +280,26 @@ internal static class SpatialCalibration
     }
 
     /// <summary>
-    /// Describes where the resting hand lands on screen, as a sanity check.
+    /// Describes where the resting hands are, for the results screen.
     /// </summary>
     /// <remarks>
-    /// If the neutral rest position maps far from the middle of the screen, the envelope
-    /// was traced off-centre from where the hand actually lives — reaching the far side
-    /// will be a stretch every time. Worth saying so before the profile is saved.
+    /// Informational only. The resting hand is not expected to sit anywhere in particular
+    /// relative to the screen — out of frame, below the working area, or even behind it
+    /// are all normal — so there is nothing here to warn about.
     /// </remarks>
-    public static string? DescribeRestPlacement(MonitorMapping mapping)
+    public static string DescribeIdle(MonitorMapping mapping)
     {
-        Vector2 rest = mapping.ToHomography().Map(mapping.NeutralRest.ToVector());
-
-        if (float.IsNaN(rest.X) || float.IsNaN(rest.Y))
+        if (mapping.Idle is not { } idle)
         {
-            return "Your resting hand maps outside the screen entirely; consider redoing the corners.";
+            return "Hands rest out of the camera's view.";
         }
 
-        float offCentre = Math.Max(Math.Abs(rest.X - 0.5f), Math.Abs(rest.Y - 0.5f));
+        Vector2 onScreen = mapping.ToHomography().Map(idle.Centre.ToVector());
+        string where = float.IsNaN(onScreen.X) || float.IsNaN(onScreen.Y)
+            ? "off the mapped area"
+            : $"at ({onScreen.X:0.00}, {onScreen.Y:0.00}) on the screen's 0–1 scale";
 
-        return offCentre > 0.35f
-            ? $"Your resting hand maps near the edge of the screen ({rest.X:0.00}, {rest.Y:0.00}), so "
-              + "reaching the opposite side will be a stretch. Redoing the corners centred on where "
-              + "your hand naturally sits would be more comfortable."
-            : null;
+        return $"Hands rest {where}, within {idle.Radius * 100:0} cm. "
+            + "Once windows can be moved (M2), a hand that appears there will not hover until it leaves.";
     }
 }

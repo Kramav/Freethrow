@@ -5,8 +5,8 @@ person and a webcam. Do them **before M2**. M2's hover highlight *is* the
 spatial mapping, and every grab it makes goes through the posture gate, so a
 fault here would feel like an M2 bug that isn't one.
 
-About 45 minutes in total. Every command runs from `E:\Company\Github\Freethrow`
-in PowerShell.
+About 45 minutes in total. Every command runs from the repository root in
+PowerShell.
 
 When a check passes, tick it in CLAUDE.md and paste what it printed.
 "Verified" without the output is how these stayed open.
@@ -41,10 +41,19 @@ monitor.
 dotnet run --project demos\Freethrow.Demo.Preview -- --calibrate-grab
 ```
 
-Nine steps: open hand, fist, pointing at the camera, resting position, four
+Nine steps: open hand, fist, pointing at the camera, idle position, four
 corners (markers appear on the monitor), and a maximum-reach sweep. Nothing
 starts until you press **Start capturing**. The bar fills only on frames where
 your hand is tracked, 45 frames per pose.
+
+**Your working area does not need to be centred in the camera's view**, but it
+does need to be *inside* it. On the pose steps the bar stops while any part of
+the hand touches the frame edge, and the line under the video names the edge.
+Move toward the middle and it resumes.
+
+**Step 4, idle position:** rest your hands wherever they normally sit. If the
+camera cannot see them there, press **My hands are out of frame**; that is a
+normal answer, not a failure. Either way, no fist is asked for.
 
 **Step 3, pointing at the camera, is the one that failed last time.** Watch
 `view` in the live line under the video. It should read clearly higher than it
@@ -57,7 +66,8 @@ On the results screen:
 | It says | Pass | If not |
 |---|---|---|
 | `no grab past view X.XX` | anything **except `0.55`** | `0.55` is the built-in default. Pointing did not separate from flat by 0.1, or tracked fewer than 15 frames. Start over and take more care over step 3. |
-| a warning about the resting hand | no warning | "maps near the edge" or "outside the screen": redo the corners with a more relaxed reach |
+| a line about where hands rest | either "out of the camera's view" or a position — both are fine | — |
+| a warning that a corner or the maximum reach was at the camera's edge | no such warning | redo that corner with a shorter reach, or aim the camera toward your working area and start over. A clipped corner is where the camera stopped seeing, not where you reached |
 
 Then press **Test the mapping**:
 
@@ -72,8 +82,16 @@ dotnet run --project demos\Freethrow.Demo.Preview -- --monitors
 Get-Content $env:LOCALAPPDATA\Freethrow\gesture-profile.json
 ```
 
-**Pass:** the primary monitor shows `mapping: calibrated <today>`, and
-`MaxViewAxisAlignment` in the JSON is not `0.55`.
+**Pass:** the primary monitor shows `mapping: calibrated <today>` and an
+`idle` line, and `MaxViewAxisAlignment` in the JSON is not `0.55`.
+
+**One measurement while you are here.** On step 3, note `view` while pointing
+at the lens from the middle of the frame, then again from near a side edge
+(not touching it). They should read about the same: the view angle is meant
+to be relative to the line from the camera to the hand, not to the camera's
+centre axis. If the edge reading is clearly lower, write both numbers down;
+the posture gate would then be stricter off-centre than in the middle, and
+that needs its own fix.
 
 ## 2. Two real hands
 

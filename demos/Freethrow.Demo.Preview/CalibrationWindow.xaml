@@ -121,8 +121,8 @@
             <Button x:Name="SecondaryButton"
                     DockPanel.Dock="Right"
                     Content="Redo this step"
-                    Width="130"
-                    Padding="0,7"
+                    MinWidth="130"
+                    Padding="12,7"
                     Margin="0,0,10,0"
                     Visibility="Collapsed"
                     Click="OnSecondaryClick" />

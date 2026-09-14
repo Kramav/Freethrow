@@ -439,6 +439,13 @@ internal static class Program
             Console.WriteLine($"    mapping: {(mapping is null
                 ? "not calibrated"
                 : $"calibrated {mapping.CalibratedAt.LocalDateTime:yyyy-MM-dd HH:mm}")}");
+
+            if (mapping is not null)
+            {
+                Console.WriteLine($"    idle   : {(mapping.Idle is { } idle
+                    ? $"({idle.Centre.X * 100:0}, {idle.Centre.Y * 100:0}) cm from frame centre, radius {idle.Radius * 100:0} cm"
+                    : "out of frame")}");
+            }
         }
 
         if (profile is { MaxReachMin: { } min, MaxReachMax: { } max })

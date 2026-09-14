@@ -67,12 +67,12 @@ src/Freethrow.Core/      Platform-agnostic. NEVER references Win32 or WinRT.
   Capture/     FrameRef (pooled), ICameraSource, RawFrameFile
   Perception/  IHandTracker, HandMetrics, HandTrackingWorker, Onnx/
   Gestures/    GestureRecognizer (per hand), HandArbiter
-  Spatial/     Homography, HandSpace (pixels -> metres)
+  Spatial/     Homography, HandSpace (pixels -> metres), FrameFit, IdleZone
   Filters/     OneEuroFilter
   Config/      GestureProfile, SpatialProfile
 src/Freethrow.Desktop/   All Win32/WinRT. Capture/, Desktop/, Overlay/
 demos/Freethrow.Demo.Preview/   Every capability, runnable
-tests/Freethrow.Core.Tests/     30 tests, no camera or desktop needed
+tests/Freethrow.Core.Tests/     45 tests, no camera or desktop needed
 tools/reference-check/          Regression check against OpenCV's implementation
 ```
 

@@ -113,7 +113,7 @@ Everything in this section exists to defeat **gorilla arm**: holding an unsuppor
 
 - **Hover (absolute):** hand position in frame → attended monitor's bounds, via the calibration homography. Window-level precision only.
 - **Grab (clutch switch):** mapping flips to **relative × gain**, so a ~15 cm hand motion crosses a large desktop and the hand stays in a small zone near the torso. Release / recenter / re-grab continues a move, exactly like lifting and repositioning a mouse.
-- **Neutral-zone calibration:** fit the hover mapping around wherever the user's hand *naturally rests* — captured during calibration — rather than centering it on the camera's field of view. The comfortable posture must be the default one, not one the user has to hunt for.
+- **Comfort comes from the corners; rest is an idle zone.** The hover mapping is fitted to four *comfortable-reach* corners (§10), so the comfortable posture is the default one without the user hunting for it. Where the hands *rest* is captured separately, and only as an **idle zone**: a hand that first appears there does not hover until it has left. *(Revised: rest was originally to be the centre of the working area. That assumed resting hands are in shot and roughly central — on many setups they sit on a keyboard below the camera's view, and a rest step that needs a visible hand stalls. The homography never used the rest point, so nothing about the mapping changed.)* Hands that rest out of frame are a valid answer and store no zone.
 - **Velocity-dependent gain:** treat gain as a tuned curve, not the constant 1:3 starting guess — low gain when moving slowly (fine placement), higher when moving fast (traversal), mirroring mouse acceleration. Expose it in config; the curve wants real tuning against `Demo.Preview`.
 - **Smoothing:** One-Euro filter on both — low lag at speed, no jitter at rest. A plain low-pass will feel laggy; do not substitute one.
 
@@ -188,7 +188,9 @@ metric = (palmCentrePx − frameCentre) ÷ (Scale ÷ WorldScale)
 
 Without this, leaning in or out after calibration silently rescales the whole mapping. `WorldScale` is a model estimate and noisy, so smooth it with the existing `OneEuroFilter` before dividing.
 
-**Captured per monitor:** the neutral rest position, and four comfortable-reach corners. **Captured once, globally:** the maximum-reach envelope.
+**Captured per monitor:** four comfortable-reach corners, and an optional idle zone (§4 — skipped when the hands rest out of frame). **Captured once, globally:** the maximum-reach envelope.
+
+**Nothing assumes the working area is centred in the frame.** The homography absorbs any constant offset, so an off-centre working area maps just as well; the real cost is clipping, where a corner or the reach sweep runs off the edge of the camera's view and records the camera's limit as if it were the arm's. `FrameFit.Edges` flags any hand touching a frame border: pose steps refuse those frames (the fingers past the border are guessed), and corners and the sweep are named on the results screen when the camera, not the reach, set them.
 
 **That split is a deliberate reduction, and the one place this deviates from the brief.** Four corners × two envelopes × N monitors is punishing — 2 monitors would be 18 captures. But the two envelopes are not used the same way: the comfortable one *is* the homography and needs four precise correspondences, while the maximum one only supplies headroom bounds so movement past the screen edge keeps tracking instead of clamping. Bounds need only a bounding box, so the maximum envelope is a single free sweep — and since it is a property of your arm rather than of a monitor, it is captured once. Additional monitors are calibrated on demand rather than in the first run.
 
@@ -246,8 +248,8 @@ Two safeguards, because that estimate is noisy: smooth it per hand with the exis
 | **M1.5** ✅ | World landmarks, 3D openness, posture gate on arming, time-based decaying debounce, measured defaults, visual `--calibrate-grab` | Grabs fire only when meant, and release when meant |
 | **M1.6** ✅ | Metric hand space, 4-corner homography per monitor, `MonitorTopology`, on-screen target overlay, live mapping test | Hand position means something on screen |
 | **M1.7** ← | Multi-hand tracking with duplicate suppression and a throttled rescan, grab-first-wins arbitration, hover on the nearest hand | The hand you raise is the hand that acts |
-| **M2** | `WindowManager`, `WindowCache`, overlay, hover-highlight + grab-drag on a **single** monitor, first pass at the gain curve | The core interaction feels right |
-| **M3** | Head pose, attention classifier, calibration wizard (per-monitor gaze **+ neutral rest zone**), monitor gating | Attention actually gates control |
+| **M2** | `WindowManager`, `WindowCache`, overlay, hover-highlight + grab-drag on a **single** monitor, first pass at the gain curve, hands ignored until they leave the idle zone | The core interaction feels right |
+| **M3** | Head pose, attention classifier, calibration wizard (per-monitor gaze), monitor gating | Attention actually gates control |
 | **M4** | Throw physics, look-to-place, multi-monitor + DPI correctness | The headline feature |
 | **M5** | Adaptive scheduling, quantization, allocation audit, `install.ps1`, IR opt-in path | Ships and stays cheap |
 
@@ -290,7 +292,7 @@ Targets: ≥25 FPS engaged end to end; <60 ms hand-motion-to-window-motion laten
 
 **Manual end-to-end (M4 acceptance):** with ≥2 monitors — look at monitor 2, raise hand, confirm a window highlights on hover, grab, drag across the boundary, release. Then repeat with a flick. Then look at monitor 1 and throw it back. Confirm: maximized windows restore correctly, mixed-DPI moves scale correctly, elevated windows fail loudly, and looking away mid-drag aborts safely.
 
-**Fatigue check (also M4 acceptance):** perform 20 consecutive window moves. If the arm tires or precision degrades over that run, the gain curve or the neutral zone is wrong — retune before adding features. This is the test that catches gorilla arm, and it cannot be automated.
+**Fatigue check (also M4 acceptance):** perform 20 consecutive window moves. If the arm tires or precision degrades over that run, the gain curve or the comfortable-reach corners are wrong — retune before adding features. This is the test that catches gorilla arm, and it cannot be automated.
 
 **Gesture acceptance (M1.5), in the preview window:** rotate an open hand to point at the camera — the skeleton must show arming as blocked and never turn amber. Close the hand side-on — it must turn amber within about 100 ms. Open it only partway — it must turn blue again promptly rather than lingering. Grab, then rotate the wrist through its natural range — it must stay amber throughout. The preview's status line reports filtered openness and the palm-axis angle, so a failure says which of the two is at fault instead of just feeling wrong.
 

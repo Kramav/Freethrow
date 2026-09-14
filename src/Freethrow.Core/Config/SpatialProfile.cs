@@ -20,7 +20,10 @@ public readonly record struct Point2(float X, float Y)
 /// <param name="DeviceName">Stable display key, such as <c>\\.\DISPLAY1</c>.</param>
 /// <param name="Description">Human-readable name at the time of calibration.</param>
 /// <param name="Coefficients">The eight homography coefficients.</param>
-/// <param name="NeutralRest">Where the hand sits at rest, in metres from frame centre.</param>
+/// <param name="Idle">
+/// Where the hands rest when not in use, or <see langword="null"/> if they rest out of the
+/// camera's view. Not the centre of the working area: that is defined by the corners.
+/// </param>
 /// <param name="Corners">The four captured corners, kept for redisplay and diagnosis.</param>
 /// <param name="Width">Monitor width in pixels when calibrated.</param>
 /// <param name="Height">Monitor height in pixels when calibrated.</param>
@@ -29,7 +32,7 @@ public sealed record MonitorMapping(
     string DeviceName,
     string Description,
     double[] Coefficients,
-    Point2 NeutralRest,
+    IdleZone? Idle,
     Point2[] Corners,
     int Width,
     int Height,

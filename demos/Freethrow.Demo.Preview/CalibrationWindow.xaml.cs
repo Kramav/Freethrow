@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Diagnostics;
 using System.IO;
 using System.Numerics;
 using System.Windows;
@@ -39,10 +40,20 @@ public partial class CalibrationWindow : Window
 {
     private const int SamplesPerPose = 45;
     private const float MinimumConfidence = 0.7f;
+    private const string IdleCapturingHint = "Rest your hands as you normally would. The bar fills while they're tracked.";
+    private const string IdleSkipLabel = "My hands are out of frame";
+
+    /// <summary>
+    /// How long the idle step waits with no hand in view before pointing at the skip
+    /// button. Without the prompt, hands resting out of shot look like a stalled wizard.
+    /// </summary>
+    private static readonly TimeSpan IdleSkipPrompt = TimeSpan.FromSeconds(3);
+
+    private static readonly string[] CornerNames = ["top-left", "top-right", "bottom-right", "bottom-left"];
 
     private readonly WindowsCameraEnumerator _enumerator = new();
     private readonly Dictionary<string, CalibrationPhase> _poses = [];
-    private readonly List<Vector2> _corners = [];
+    private readonly List<(Vector2 Position, FrameEdge Edges)> _corners = [];
     private readonly object _gate = new();
     private readonly string? _gesturePath;
     private readonly string? _spatialPath;
@@ -60,10 +71,17 @@ public partial class CalibrationWindow : Window
     private Mode _mode = Mode.Preparing;
 
     private CalibrationPhase? _recordingPose;
+    private IdleCapture? _recordingIdle;
     private PointCapture? _recordingPoint;
     private SweepCapture? _recordingSweep;
-    private Vector2 _neutralRest;
+    private IdleZone? _idle;
     private bool _spaceHeld;
+
+    private FrameEdge _lastEdges;
+    private FrameEdge _lostAtEdges;
+    private bool _handWasVisible;
+    private long _idleQuietSince;
+    private bool _idleSkipPromptShown;
 
     private GestureProfile? _fittedGesture;
     private MonitorMapping? _fittedMapping;
@@ -165,9 +183,9 @@ public partial class CalibrationWindow : Window
             "Now POINT your hand at the camera, fingers toward the lens.",
             "This teaches Freethrow which poses it cannot read, so it stops grabbing by accident."),
 
-        new PointStep(null, "Resting position",
-            "Let your arm relax where it naturally sits.",
-            "This becomes the middle of your working area, so make it genuinely comfortable."),
+        new IdleStep("Idle position",
+            "Put your hands where they sit when you're not using Freethrow — keyboard, mouse, lap.",
+            "If the camera can't see them there, choose \"My hands are out of frame\". That is a normal setup, not a problem."),
 
         new PointStep(0, "Top-left corner",
             $"Reach toward the TOP-LEFT marker on {monitor.Description}.",
@@ -258,6 +276,16 @@ public partial class CalibrationWindow : Window
             ? HandSpace.ToMetric(pose!, result.FrameWidth, result.FrameHeight)
             : Vector2.Zero;
 
+        // Edges come from any tracked pose, confident or not: a hand sliding off the side
+        // of the view usually loses confidence before it disappears, and that is exactly
+        // the loss worth explaining.
+        FrameEdge edges = pose is not null && result is not null
+            ? FrameFit.Edges(pose, result.FrameWidth, result.FrameHeight)
+            : FrameEdge.None;
+
+        NoteVisibility(pose is not null, edges);
+        UpdateIdleSkipPrompt(pose is not null);
+
         if (_mode == Mode.Testing)
         {
             ShowTestPointer(usable ? metric : null);
@@ -269,7 +297,7 @@ public partial class CalibrationWindow : Window
 
         if (_mode == Mode.Capturing && usable)
         {
-            blocked = Record(pose!, metric, hand!.Gesture.State);
+            blocked = Record(pose!, metric, edges, hand!.Gesture.State);
             if (blocked is null && IsCurrentStepComplete())
             {
                 CompleteStep();
@@ -280,20 +308,33 @@ public partial class CalibrationWindow : Window
         UpdateReadouts(pose, usable, blocked);
     }
 
-    private string? Record(HandPose pose, Vector2 metric, GestureState state)
+    private string? Record(HandPose pose, Vector2 metric, FrameEdge edges, GestureState state)
     {
         switch (Current)
         {
             case PoseStep when _recordingPose is not null:
-                // Pose steps read the hand's shape, which needs no position at all.
+                // Pose steps read the hand's shape, which needs no position at all — but
+                // it does need all of the hand. Past the border the fingers are the model's
+                // guess, and a guessed fist is how thresholds end up in the wrong place.
+                if (edges != FrameEdge.None)
+                {
+                    return $"hand at the {SideText(edges)} edge of the camera's view — move toward the centre";
+                }
+
                 _recordingPose.Add(pose);
                 return null;
 
+            case IdleStep when _recordingIdle is not null:
+                // A resting hand half out of shot is still a resting hand; where it enters
+                // the frame is exactly what the idle zone should record.
+                _recordingIdle.Offer(metric);
+                return null;
+
             case PointStep when _recordingPoint is not null:
-                return _recordingPoint.Offer(metric, state, _spaceHeld);
+                return _recordingPoint.Offer(metric, edges, state, _spaceHeld);
 
             case SweepStep when _recordingSweep is not null:
-                _recordingSweep.Offer(metric);
+                _recordingSweep.Offer(metric, edges);
                 return null;
 
             default:
@@ -304,10 +345,89 @@ public partial class CalibrationWindow : Window
     private bool IsCurrentStepComplete() => Current switch
     {
         PoseStep => _recordingPose!.Openness.Count >= SamplesPerPose,
+        IdleStep => _recordingIdle!.IsComplete,
         PointStep => _recordingPoint!.IsComplete,
         SweepStep => _recordingSweep!.IsComplete,
         _ => false,
     };
+
+    /// <summary>Remembers which frame border, if any, the hand was touching when it was lost.</summary>
+    private void NoteVisibility(bool visible, FrameEdge edges)
+    {
+        if (visible)
+        {
+            _lastEdges = edges;
+            _lostAtEdges = FrameEdge.None;
+        }
+        else if (_handWasVisible)
+        {
+            _lostAtEdges = _lastEdges;
+        }
+
+        _handWasVisible = visible;
+    }
+
+    /// <summary>
+    /// On the idle step, points at the skip button once no hand has been seen for a while.
+    /// </summary>
+    private void UpdateIdleSkipPrompt(bool handVisible)
+    {
+        if (_mode != Mode.Capturing || Current is not IdleStep)
+        {
+            return;
+        }
+
+        if (handVisible)
+        {
+            _idleQuietSince = Stopwatch.GetTimestamp();
+        }
+
+        bool quiet = Stopwatch.GetElapsedTime(_idleQuietSince) >= IdleSkipPrompt;
+        if (quiet == _idleSkipPromptShown)
+        {
+            return;
+        }
+
+        _idleSkipPromptShown = quiet;
+        StatusText.Text = quiet
+            ? $"No hand seen for {IdleSkipPrompt.TotalSeconds:0} s. If your hands rest out of view, choose \"My hands are out of frame\"."
+            : IdleCapturingHint;
+    }
+
+    /// <summary>
+    /// Names frame borders the way the user sees them.
+    /// </summary>
+    /// <remarks>
+    /// The preview is mirrored (<c>ScaleX="-1"</c> in the XAML), so the camera frame's left
+    /// border is on the right of what the user watches — and it is also their physical
+    /// right. Naming the camera's side would send them the wrong way every time.
+    /// </remarks>
+    private static string SideText(FrameEdge edges)
+    {
+        List<string> sides = [];
+
+        if ((edges & FrameEdge.Top) != 0)
+        {
+            sides.Add("top");
+        }
+
+        if ((edges & FrameEdge.Bottom) != 0)
+        {
+            sides.Add("bottom");
+        }
+
+        if ((edges & FrameEdge.Right) != 0)
+        {
+            sides.Add("left");
+        }
+
+        if ((edges & FrameEdge.Left) != 0)
+        {
+            sides.Add("right");
+        }
+
+        return string.Join(" and ", sides);
+    }
 
     private void UpdateReadouts(HandPose? pose, bool usable, string? blocked)
     {
@@ -316,9 +436,21 @@ public partial class CalibrationWindow : Window
             return;
         }
 
-        if (pose is null)
+        if (pose is null && Current is IdleStep && _mode is Mode.Ready or Mode.Capturing)
         {
-            TrackingText.Text = "no hand detected — move into frame";
+            // Not a warning here: hands resting out of shot is one of the two right answers.
+            TrackingText.Text = "no hand in view";
+            TrackingText.Foreground = (Brush)FindResource("Muted");
+        }
+        else if (pose is null)
+        {
+            TrackingText.Text = _lostAtEdges == FrameEdge.None
+                ? "no hand detected — move into frame"
+                : $"hand left the camera's view at the {SideText(_lostAtEdges)} edge"
+                  + (_mode == Mode.Capturing && Current is PointStep or SweepStep
+                      ? " — reach less far, or aim the camera toward your working area"
+                      : string.Empty);
+
             TrackingText.Foreground = (Brush)FindResource("Warn");
         }
         else
@@ -342,6 +474,7 @@ public partial class CalibrationWindow : Window
         {
             PoseStep => (_recordingPose!.Openness.Count / (double)SamplesPerPose,
                 $"{_recordingPose.Openness.Count} / {SamplesPerPose}"),
+            IdleStep => (_recordingIdle!.Progress, $"{_recordingIdle.Count} / {_recordingIdle.Target}"),
             PointStep => (_recordingPoint!.Progress, $"{_recordingPoint.Count} / {_recordingPoint.Target}"),
             SweepStep => (_recordingSweep!.Progress,
                 $"{_recordingSweep.Extent.X * 100:0} x {_recordingSweep.Extent.Y * 100:0} cm"),
@@ -399,6 +532,7 @@ public partial class CalibrationWindow : Window
         _stepIndex = index;
         _mode = Mode.Ready;
         _recordingPose = null;
+        _recordingIdle = null;
         _recordingPoint = null;
         _recordingSweep = null;
 
@@ -413,10 +547,11 @@ public partial class CalibrationWindow : Window
 
         PrimaryButton.Content = "Start capturing";
         PrimaryButton.IsEnabled = true;
-        SecondaryButton.Visibility = Visibility.Collapsed;
+        ShowIdleSkip(step is IdleStep);
 
-        bool spatial = step is not PoseStep;
-        ConfirmationPanel.Visibility = spatial && step is PointStep
+        // Only corners are confirmed. The idle step in particular must never ask for a
+        // grab: nobody makes a fist to rest.
+        ConfirmationPanel.Visibility = step is PointStep
             ? Visibility.Visible
             : Visibility.Collapsed;
 
@@ -436,11 +571,18 @@ public partial class CalibrationWindow : Window
         _overlay.SetPointer(null);
         _overlay.SetShowAllCorners(true);
         _overlay.SetTarget((step as PointStep)?.CornerIndex);
-        _overlay.SetCaption(step is SweepStep
-            ? "Sweep your whole reach"
-            : step is PointStep { CornerIndex: null }
-                ? "Relax your arm"
-                : "Reach to the highlighted marker");
+        _overlay.SetCaption(step switch
+        {
+            SweepStep => "Sweep your whole reach",
+            IdleStep => "Relax your arm",
+            _ => "Reach to the highlighted marker",
+        });
+    }
+
+    private void ShowIdleSkip(bool visible)
+    {
+        SecondaryButton.Content = IdleSkipLabel;
+        SecondaryButton.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void StartCapturing()
@@ -454,6 +596,12 @@ public partial class CalibrationWindow : Window
                 _poses[pose.Key] = _recordingPose;
                 break;
 
+            case IdleStep:
+                _recordingIdle = new IdleCapture();
+                _idleQuietSince = Stopwatch.GetTimestamp();
+                _idleSkipPromptShown = false;
+                break;
+
             case PointStep:
                 _recordingPoint = new PointCapture(Confirmation);
                 break;
@@ -463,12 +611,18 @@ public partial class CalibrationWindow : Window
                 break;
         }
 
-        StatusText.Text = Current is PointStep
-            ? ConfirmationHint()
-            : "Hold the pose. The bar only fills while your hand is tracked.";
+        StatusText.Text = Current switch
+        {
+            PointStep => ConfirmationHint(),
+            IdleStep => IdleCapturingHint,
+            _ => "Hold the pose. The bar only fills while your hand is tracked.",
+        };
 
         PrimaryButton.Content = "Cancel step";
-        SecondaryButton.Visibility = Visibility.Collapsed;
+
+        // The skip stays available mid-capture: finding out that the camera cannot see
+        // your resting hands is usually what capturing reveals.
+        ShowIdleSkip(Current is IdleStep);
     }
 
     private string ConfirmationHint() => Confirmation switch
@@ -484,12 +638,13 @@ public partial class CalibrationWindow : Window
 
         switch (Current)
         {
-            case PointStep { CornerIndex: null }:
-                _neutralRest = _recordingPoint!.Result;
+            case IdleStep:
+                // No capture means the skip was chosen: the hands rest out of view.
+                _idle = _recordingIdle?.Result;
                 break;
 
             case PointStep:
-                _corners.Add(_recordingPoint!.Result);
+                _corners.Add((_recordingPoint!.Result, _recordingPoint.EdgeContact));
                 break;
 
             case SweepStep:
@@ -498,7 +653,9 @@ public partial class CalibrationWindow : Window
         }
 
         CaptureProgress.Value = 1;
-        StatusText.Text = "Captured.";
+        StatusText.Text = Current is IdleStep && _idle is null
+            ? "Recorded: your hands rest out of the camera's view."
+            : "Captured.";
 
         bool isLast = _stepIndex == _steps.Length - 1;
         PrimaryButton.Content = isLast ? "See results" : "Next step";
@@ -535,7 +692,7 @@ public partial class CalibrationWindow : Window
     private void Finish()
     {
         (MonitorMapping? mapping, string? problem) =
-            SpatialCalibration.Fit(_corners, _neutralRest, _monitor!);
+            SpatialCalibration.Fit([.. _corners.Select(corner => corner.Position)], _idle, _monitor!);
 
         if (mapping is null)
         {
@@ -547,7 +704,7 @@ public partial class CalibrationWindow : Window
         _testTransform = mapping.ToHomography();
         _mode = Mode.Finished;
 
-        string? restWarning = SpatialCalibration.DescribeRestPlacement(mapping);
+        string? edgeWarning = DescribeCameraEdges();
         Vector2 reach = _reach?.Extent ?? Vector2.Zero;
 
         StepLabel.Text = "Calibration complete";
@@ -557,8 +714,9 @@ public partial class CalibrationWindow : Window
             + $"{_fittedGesture.ReleaseOpenness:0.00}, no grab past view "
             + $"{_fittedGesture.MaxViewAxisAlignment:0.00}.\n"
             + $"Working area {WorkingAreaDescription()} mapped to {_monitor!.Description}, "
-            + $"inside a {reach.X * 100:0} x {reach.Y * 100:0} cm maximum reach."
-            + (restWarning is null ? string.Empty : $"\n\n{restWarning}");
+            + $"inside a {reach.X * 100:0} x {reach.Y * 100:0} cm maximum reach.\n"
+            + SpatialCalibration.DescribeIdle(mapping)
+            + (edgeWarning is null ? string.Empty : $"\n\n{edgeWarning}");
 
         TrackingText.Text = string.Empty;
         SampleCountText.Text = string.Empty;
@@ -581,9 +739,39 @@ public partial class CalibrationWindow : Window
             return "unknown";
         }
 
-        float width = _corners.Max(c => c.X) - _corners.Min(c => c.X);
-        float height = _corners.Max(c => c.Y) - _corners.Min(c => c.Y);
+        float width = _corners.Max(c => c.Position.X) - _corners.Min(c => c.Position.X);
+        float height = _corners.Max(c => c.Position.Y) - _corners.Min(c => c.Position.Y);
         return $"{width * 100:0} x {height * 100:0} cm";
+    }
+
+    /// <summary>
+    /// Names every measurement that was taken with the hand at the edge of the camera's view.
+    /// </summary>
+    /// <remarks>
+    /// Nothing assumes the working area sits in the middle of the frame, so a corner or
+    /// the reach sweep can run off the side of the view. The numbers look just as
+    /// plausible either way; only the edge contact says the camera, not the arm, set them.
+    /// </remarks>
+    private string? DescribeCameraEdges()
+    {
+        List<string> lines = [];
+
+        for (int i = 0; i < _corners.Count && i < CornerNames.Length; i++)
+        {
+            if (_corners[i].Edges != FrameEdge.None)
+            {
+                lines.Add($"The {CornerNames[i]} corner was captured at the {SideText(_corners[i].Edges)} edge "
+                    + "of the camera's view, so it may be off. Redo it, or aim the camera toward your working area.");
+            }
+        }
+
+        if (_reach is { ClippedSides: not FrameEdge.None } reach)
+        {
+            lines.Add($"Your maximum reach is cut off by the camera on the {SideText(reach.ClippedSides)}: "
+                + "there it is the camera's limit, not your arm's.");
+        }
+
+        return lines.Count == 0 ? null : string.Join("\n", lines);
     }
 
     /// <summary>Shows the live mapped pointer over the corner targets.</summary>
@@ -651,11 +839,22 @@ public partial class CalibrationWindow : Window
     {
         switch (_mode)
         {
+            case Mode.Ready or Mode.Capturing when Current is IdleStep:
+                // Hands resting out of shot: record that, keeping nothing half-captured.
+                _recordingIdle = null;
+                CompleteStep();
+                break;
+
             case Mode.StepComplete:
                 // Drop whatever the step just recorded and take it again.
-                if (Current is PointStep { CornerIndex: not null } && _corners.Count > 0)
+                if (Current is PointStep && _corners.Count > 0)
                 {
                     _corners.RemoveAt(_corners.Count - 1);
+                }
+
+                if (Current is IdleStep)
+                {
+                    _idle = null;
                 }
 
                 BeginStep(_stepIndex);
@@ -686,6 +885,7 @@ public partial class CalibrationWindow : Window
     {
         _poses.Clear();
         _corners.Clear();
+        _idle = null;
         _fittedGesture = null;
         _fittedMapping = null;
         _testTransform = null;
@@ -794,7 +994,10 @@ public partial class CalibrationWindow : Window
     private sealed record PoseStep(string Key, string Title, string Prompt, string Hint)
         : WizardStep(Title, Prompt, Hint);
 
-    private sealed record PointStep(int? CornerIndex, string Title, string Prompt, string Hint)
+    private sealed record IdleStep(string Title, string Prompt, string Hint)
+        : WizardStep(Title, Prompt, Hint);
+
+    private sealed record PointStep(int CornerIndex, string Title, string Prompt, string Hint)
         : WizardStep(Title, Prompt, Hint);
 
     private sealed record SweepStep(string Title, string Prompt, string Hint)
