@@ -40,6 +40,7 @@ internal static class Program
                 "--list" or "-l" => Task.Run(ListDevicesAsync).GetAwaiter().GetResult(),
                 "--monitors" or "-m" => ListMonitors(),
                 "--overlay" => ShowOverlay(args),
+                "--formats" or "-f" => Task.Run(() => ListFormatsAsync(args)).GetAwaiter().GetResult(),
                 "--probe" or "-p" => Task.Run(() => ProbeAsync(args)).GetAwaiter().GetResult(),
                 "--snap" or "-s" => Task.Run(() => SnapAsync(args)).GetAwaiter().GetResult(),
                 "--landmarks" => RunLandmarks(args),
@@ -86,14 +87,16 @@ internal static class Program
     }
 
     /// <summary>
-    /// Opens a camera, streams for a few seconds and reports what actually happened:
-    /// negotiated format, frame rate, dropped frames, latency, and bytes allocated per
-    /// frame. That last number is the one that shows whether frame pooling is working.
+    /// Prints every format a camera offers, and marks the one the scorer picked.
     /// </summary>
-    private static async Task<int> ProbeAsync(string[] args)
+    /// <remarks>
+    /// Exists because "offers : 30 format(s)" is not an answer when a camera delivers
+    /// half its nominal rate: the question is whether a better format was on the table
+    /// and the scorer passed it over, or whether the device simply has nothing faster.
+    /// </remarks>
+    private static async Task<int> ListFormatsAsync(string[] args)
     {
         int requestedIndex = args.Length > 1 && int.TryParse(args[1], out int parsedIndex) ? parsedIndex : -1;
-        double seconds = args.Length > 2 && double.TryParse(args[2], out double parsedSeconds) ? parsedSeconds : 3;
 
         var enumerator = new WindowsCameraEnumerator();
         IReadOnlyList<CameraDeviceInfo> devices = await enumerator.EnumerateAsync();
@@ -115,6 +118,55 @@ internal static class Program
             : devices.FirstOrDefault(d => d.Kind == CameraKind.Color) ?? devices[0];
 
         await using ICameraSource source = await enumerator.OpenAsync(device);
+
+        Console.WriteLine($"device : {device.GroupName} ({device.Kind})");
+        Console.WriteLine($"active : {source.ActiveFormat}");
+        Console.WriteLine();
+
+        foreach (CameraFormat format in source.SupportedFormats
+            .OrderByDescending(f => f.PixelCount)
+            .ThenByDescending(f => f.FrameRate))
+        {
+            string marker = format == source.ActiveFormat ? " <- active" : string.Empty;
+            Console.WriteLine($"  {format}{marker}");
+        }
+
+        return 0;
+    }
+
+    /// <summary>
+    /// Opens a camera, streams for a few seconds and reports what actually happened:
+    /// negotiated format, frame rate, dropped frames, latency, and bytes allocated per
+    /// frame. That last number is the one that shows whether frame pooling is working.
+    /// </summary>
+    private static async Task<int> ProbeAsync(string[] args)
+    {
+        int requestedIndex = args.Length > 1 && int.TryParse(args[1], out int parsedIndex) ? parsedIndex : -1;
+        double seconds = args.Length > 2 && double.TryParse(args[2], out double parsedSeconds) ? parsedSeconds : 3;
+        string? subtype = args.Length > 3 ? args[3] : null;
+
+        var enumerator = new WindowsCameraEnumerator();
+        IReadOnlyList<CameraDeviceInfo> devices = await enumerator.EnumerateAsync();
+
+        if (devices.Count == 0)
+        {
+            Console.Error.WriteLine("No cameras found.");
+            return 2;
+        }
+
+        if (requestedIndex >= devices.Count)
+        {
+            Console.Error.WriteLine($"No camera at index {requestedIndex}; {devices.Count} available.");
+            return 2;
+        }
+
+        CameraDeviceInfo device = requestedIndex >= 0
+            ? devices[requestedIndex]
+            : devices.FirstOrDefault(d => d.Kind == CameraKind.Color) ?? devices[0];
+
+        await using ICameraSource source = await enumerator.OpenAsync(
+            device,
+            new CameraOpenOptions { PreferredSubtype = subtype });
 
         Console.WriteLine($"device  : {device.GroupName} ({device.Kind})");
         Console.WriteLine($"format  : {source.ActiveFormat}");
@@ -141,6 +193,12 @@ internal static class Program
         await Task.Delay(TimeSpan.FromSeconds(seconds));
         long allocatedAfter = GC.GetTotalAllocatedBytes(precise: true);
 
+        // Read before stopping: PerSecond decays an open window, and StopAsync takes long
+        // enough that the settled rate was being divided by the shutdown as well as the
+        // stream -- reporting a camera as slower than it is, which is the one direction a
+        // capture diagnostic must never be wrong in.
+        double endRate = frameRate.PerSecond;
+
         await source.StopAsync();
         source.FrameArrived -= OnFrameArrived;
 
@@ -153,7 +211,7 @@ internal static class Program
         }
 
         Console.WriteLine($"rate      : {captured / seconds:0.0} fps average over the probe, "
-            + $"{frameRate.PerSecond:0.0} fps at the end");
+            + $"{endRate:0.0} fps at the end");
         Console.WriteLine($"latency   : {latency.Value:0.0} ms mean, {latency.Max:0.0} ms worst");
         Console.WriteLine($"frame     : {description}");
         Console.WriteLine($"allocated : {(allocatedAfter - allocatedBefore) / 1024.0:0} KB total, "
@@ -549,7 +607,9 @@ internal static class Program
         Console.WriteLine();
         Console.WriteLine("  (no arguments)              open the preview window");
         Console.WriteLine("  --list                      list camera sources, infrared included");
-        Console.WriteLine("  --probe [index] [seconds]   stream briefly and report capture health");
+        Console.WriteLine("  --formats [index]           list every format a camera offers");
+        Console.WriteLine("  --probe [index] [seconds] [subtype]");
+        Console.WriteLine("                              stream briefly and report capture health");
         Console.WriteLine("  --snap [path] [index]       save one frame uncompressed, for replay");
         Console.WriteLine("  --landmarks <path>          run the tracker over a saved frame");
         Console.WriteLine("  --track [seconds] [index]   track a hand live and report the cost");

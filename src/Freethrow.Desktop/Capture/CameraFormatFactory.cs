@@ -60,7 +60,15 @@ internal static class CameraFormatFactory
             double compressionPenalty =
                 format.Subtype.Equals("MJPG", StringComparison.OrdinalIgnoreCase) ? 50 : 0;
 
-            double score = resolutionPenalty + frameRatePenalty + compressionPenalty;
+            // Large enough to outweigh everything else: a caller naming a subtype is running
+            // a comparison, and silently handing back a different one would void it.
+            double subtypePenalty =
+                options.PreferredSubtype is not null
+                && !format.Subtype.Equals(options.PreferredSubtype, StringComparison.OrdinalIgnoreCase)
+                    ? 100_000
+                    : 0;
+
+            double score = resolutionPenalty + frameRatePenalty + compressionPenalty + subtypePenalty;
             if (score < bestScore)
             {
                 bestScore = score;

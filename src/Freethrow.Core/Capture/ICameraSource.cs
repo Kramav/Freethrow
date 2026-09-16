@@ -75,6 +75,16 @@ public sealed record CameraOpenOptions
     public int PreferredHeight { get; init; } = 480;
 
     public double PreferredFrameRate { get; init; } = 30;
+
+    /// <summary>
+    /// Subtype to prefer (for example <c>YUY2</c>), or null to let the scorer decide.
+    /// </summary>
+    /// <remarks>
+    /// For measuring one capture path against another with <c>--probe</c>. On the Adesso
+    /// CyberTrack K4, NV12, YUY2 and MJPG at 640x480 all advertise 25 fps; NV12 delivered
+    /// 15.9 and YUY2 14.1, while MJPG failed to start with OutputFormatNotSupported.
+    /// </remarks>
+    public string? PreferredSubtype { get; init; }
 }
 
 /// <summary>Discovers cameras and opens them.</summary>

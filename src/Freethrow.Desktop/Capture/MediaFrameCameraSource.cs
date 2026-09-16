@@ -216,11 +216,30 @@ public sealed class MediaFrameCameraSource : ICameraSource
             return;
         }
 
-        Interlocked.Increment(ref _delivered);
         using (frame)
         {
-            handler(this, new FrameEventArgs(frame));
+            try
+            {
+                handler(this, new FrameEventArgs(frame));
+            }
+            catch (Exception ex)
+            {
+                // This runs on a WinRT callback thread with no frame above it to catch
+                // anything, so a subscriber that throws used to take the whole process
+                // down -- and MainWindow's handler calls FrameRef.Retain(), which throws
+                // ObjectDisposedException by design once capture stops. Containing it
+                // here is what makes "handlers must be quick" a contract rather than a
+                // loaded gun. The reason is recorded so a silently-failing subscriber
+                // shows up in --probe as drops instead of just a low frame count.
+                Drop($"subscriber threw: {ex.GetType().Name}: {ex.Message}");
+                return;
+            }
         }
+
+        // Counted only once the handler has actually returned. Incrementing before the
+        // call counted failed deliveries as successes, so delivered + dropped no longer
+        // closed against the frames the reader produced.
+        Interlocked.Increment(ref _delivered);
     }
 
     /// <summary>
