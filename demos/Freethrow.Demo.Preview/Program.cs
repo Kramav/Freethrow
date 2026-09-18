@@ -48,6 +48,7 @@ internal static class Program
                 "--track" or "-t" => Task.Run(() => TrackAsync(args)).GetAwaiter().GetResult(),
                 // Runs on this STA thread rather than the pool: it opens a window.
                 "--calibrate-grab" or "-c" => RunCalibration(args),
+                "--hand-test" => RunHandTest(args),
                 "--help" or "-h" or "/?" => PrintUsage(0),
                 _ => PrintUnknownArgument(args[0]),
             };
@@ -378,72 +379,17 @@ internal static class Program
         // path including arbitration rather than a simplified stand-in.
         using var worker = new HandTrackingWorker(tracker, gestureOptions);
 
-        int grabs = 0;
         int twoHandFrames = 0;
 
-        // Collected on the worker thread, read once capture has stopped. Confidence is split
-        // by hand shape because a fist hides its fingers and scores lower than an open hand,
-        // and every gate that acts on confidence was set without measuring that difference.
+        // Collected on the worker thread, read once capture has stopped.
         var statsGate = new object();
-        var confidenceByShape = new Dictionary<string, List<float>>
-        {
-            ["closed"] = [],
-            ["in between"] = [],
-            ["open"] = [],
-        };
-        var viewWidths = new List<float>();
-        var holding = new HashSet<int>();
-        int released = 0;
-        int droppedByTracker = 0;
-        int pastGrace = 0;
+        var quality = new TrackingQuality(gestureOptions.GrabOpenness, gestureOptions.ReleaseOpenness);
 
         void OnResult(object? sender, HandTrackingResult result)
         {
             lock (statsGate)
             {
-                foreach (TrackedHand hand in result.Hands)
-                {
-                    if (hand.Gesture.GrabStarted)
-                    {
-                        grabs++;
-                    }
-
-                    if (hand.Gesture.GrabAborted)
-                    {
-                        pastGrace++;
-                    }
-                    else if (hand.Gesture.GrabEnded)
-                    {
-                        released++;
-                    }
-
-                    // Raw, not the recognizer's smoothed openness: that stops updating below
-                    // its confidence gate, which is exactly the frames being measured.
-                    float openness = HandMetrics.Openness(hand.Pose);
-                    string shape = openness <= gestureOptions.GrabOpenness ? "closed"
-                        : openness >= gestureOptions.ReleaseOpenness ? "open"
-                        : "in between";
-                    confidenceByShape[shape].Add(hand.Pose.Confidence);
-
-                    if (hand.DepthProxy > 0)
-                    {
-                        viewWidths.Add(result.FrameWidth / hand.DepthProxy);
-                    }
-                }
-
-                // A hand the tracker drops takes its recognizer with it on the same frame, so
-                // its grab never reports as aborted — it simply stops appearing. Counted here,
-                // or that way of losing a grab would be invisible.
-                droppedByTracker += holding.Count(id => !result.Hands.Any(hand => hand.Id == id));
-
-                holding.Clear();
-                foreach (TrackedHand hand in result.Hands)
-                {
-                    if (hand.Gesture.State == GestureState.Grab)
-                    {
-                        holding.Add(hand.Id);
-                    }
-                }
+                quality.Add(result);
 
                 if (result.Hands.Count > 1)
                 {
@@ -508,21 +454,22 @@ internal static class Program
         Console.WriteLine($"model runs : {tracker.DetectionRuns} detection, {tracker.TrackingRuns} tracking");
         lock (statsGate)
         {
-            Console.WriteLine($"grabs      : {grabs} started, {released} released, "
-                + $"{droppedByTracker + pastGrace} lost ({droppedByTracker} dropped by the tracker, "
-                + $"{pastGrace} past the {gestureOptions.TrackingLossGraceSeconds:0.00} s grace)");
+            Console.WriteLine($"grabs      : {quality.GrabsStarted} started, {quality.GrabsReleased} released, "
+                + $"{quality.GrabsLost} lost ({quality.GrabsDroppedByTracker} dropped by the tracker, "
+                + $"{quality.GrabsPastGrace} past the {gestureOptions.TrackingLossGraceSeconds:0.00} s grace)");
 
             Console.WriteLine("confidence : by hand shape; frames the tracker dropped are not counted");
-            foreach ((string shape, List<float> values) in confidenceByShape)
+            foreach (HandShape shape in Enum.GetValues<HandShape>())
             {
-                Console.WriteLine($"  {shape,-10}  {DescribeConfidence(values, gestureOptions.MinConfidence)}");
+                Console.WriteLine($"  {HandTestReport.ShapeName(shape),-10}  "
+                    + DescribeConfidence(quality.Confidence(shape), gestureOptions.MinConfidence));
             }
 
-            if (viewWidths.Count > 0)
+            ConfidenceSample widths = quality.ViewWidths();
+            if (!widths.IsEmpty)
             {
-                float[] widths = [.. viewWidths.Order()];
-                Console.WriteLine($"view width : the camera sees {Percentile(widths, 0.5f) * 100:0} cm across "
-                    + $"at your hand (middle 80%: {Percentile(widths, 0.1f) * 100:0}–{Percentile(widths, 0.9f) * 100:0} cm)");
+                Console.WriteLine($"view width : the camera sees {widths.Median * 100:0} cm across at your hand "
+                    + $"(middle 80%: {widths.Percentile(0.1f) * 100:0}–{widths.Percentile(0.9f) * 100:0} cm)");
             }
         }
 
@@ -548,25 +495,18 @@ internal static class Program
     /// <summary>
     /// Summarises confidence for one hand shape against the two gates that act on it.
     /// </summary>
-    private static string DescribeConfidence(List<float> values, float gestureGate)
+    private static string DescribeConfidence(ConfidenceSample sample, float gestureGate)
     {
-        if (values.Count == 0)
+        if (sample.IsEmpty)
         {
             return "no frames";
         }
 
-        float[] sorted = [.. values.Order()];
-        return $"{sorted.Length,5} frames  median {Percentile(sorted, 0.5f):0.00}  min {sorted[0]:0.00}  "
-            + $"under {gestureGate:0.00} (grab ignores it) {Share(sorted, gestureGate):0%}  "
+        return $"{sample.Count,5} frames  median {sample.Median:0.00}  10th pct {sample.Percentile(0.1f):0.00}  "
+            + $"under {gestureGate:0.00} (grab ignores it) {sample.ShareUnder(gestureGate):0%}  "
             + $"under {CalibrationWindow.MinimumConfidence:0.00} (calibration refuses it) "
-            + $"{Share(sorted, CalibrationWindow.MinimumConfidence):0%}";
+            + $"{sample.ShareUnder(CalibrationWindow.MinimumConfidence):0%}";
     }
-
-    private static float Percentile(float[] sorted, float fraction) =>
-        sorted[(int)MathF.Round(fraction * (sorted.Length - 1))];
-
-    private static double Share(float[] sorted, float threshold) =>
-        sorted.Count(value => value < threshold) / (double)sorted.Length;
 
     /// <summary>
     /// Lists the attached displays and whether each has a spatial calibration.
@@ -716,6 +656,19 @@ internal static class Program
         return application.Run(new CalibrationWindow(profilePath, reach: reach));
     }
 
+    /// <summary>
+    /// Opens the scripted hand-tracking test: fixed poses at three distances, judged against
+    /// the confidence gates and compared with the previous run.
+    /// </summary>
+    private static int RunHandTest(string[] args)
+    {
+        int at = Array.IndexOf(args, "--compare");
+        string? comparePath = at >= 0 && at + 1 < args.Length ? args[at + 1] : null;
+
+        var application = new Application { ShutdownMode = ShutdownMode.OnMainWindowClose };
+        return application.Run(new HandTestWindow(comparePath));
+    }
+
     private static int PrintUsage(int exitCode)
     {
         Console.WriteLine("Freethrow preview");
@@ -732,6 +685,10 @@ internal static class Program
         Console.WriteLine("                              fit grab thresholds and the screen mapping to");
         Console.WriteLine("                              your own hand; --sideways maps left-to-right only,");
         Console.WriteLine("                              for a camera that cannot see vertical reach");
+        Console.WriteLine("  --hand-test [--compare path]");
+        Console.WriteLine("                              scripted tracking test: open and closed hand at three");
+        Console.WriteLine("                              distances, checked against the confidence gates and");
+        Console.WriteLine("                              compared with the previous run (or the one given)");
         Console.WriteLine();
         Console.WriteLine("Index comes from --list. Without one, the first colour camera is used.");
         return exitCode;

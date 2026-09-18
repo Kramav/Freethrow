@@ -1,0 +1,140 @@
+<Window x:Class="Freethrow.Demo.Preview.HandTestWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:local="clr-namespace:Freethrow.Demo.Preview"
+        Title="Freethrow — Hand Tracking Test"
+        Height="760"
+        Width="980"
+        Background="#FF12141A"
+        TextOptions.TextFormattingMode="Display">
+
+    <Window.Resources>
+        <SolidColorBrush x:Key="Muted" Color="#FF9AA4B2" />
+        <SolidColorBrush x:Key="Bright" Color="#FFE8EDF5" />
+        <SolidColorBrush x:Key="Good" Color="#FF4ADE80" />
+        <SolidColorBrush x:Key="Warn" Color="#FFF2A65A" />
+    </Window.Resources>
+
+    <Grid Margin="18">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- Prompt -->
+        <StackPanel Grid.Row="0" Margin="0,0,0,12">
+            <TextBlock x:Name="StepLabel"
+                       Foreground="{StaticResource Muted}"
+                       FontSize="12"
+                       Text="" />
+            <TextBlock x:Name="PromptText"
+                       Foreground="{StaticResource Bright}"
+                       FontSize="22"
+                       TextWrapping="Wrap"
+                       Margin="0,4,0,0"
+                       Text="Getting the camera ready…" />
+            <TextBlock x:Name="HintText"
+                       Foreground="{StaticResource Muted}"
+                       FontSize="13"
+                       TextWrapping="Wrap"
+                       Margin="0,6,0,0"
+                       Text="" />
+        </StackPanel>
+
+        <!-- Live view, replaced by the results when the run ends. -->
+        <Grid Grid.Row="1">
+            <Border x:Name="PreviewBorder"
+                    Background="Black"
+                    CornerRadius="6"
+                    ClipToBounds="True">
+                <Grid RenderTransformOrigin="0.5,0.5">
+                    <Grid.RenderTransform>
+                        <ScaleTransform ScaleX="-1" />
+                    </Grid.RenderTransform>
+                    <Image x:Name="PreviewImage" Stretch="Uniform" />
+                    <local:SkeletonOverlay x:Name="Skeleton" />
+                </Grid>
+            </Border>
+
+            <!-- A read-only text box rather than a text block, so the results can be selected and pasted. -->
+            <TextBox x:Name="ResultsText"
+                     Visibility="Collapsed"
+                     IsReadOnly="True"
+                     FontFamily="Consolas"
+                     FontSize="12"
+                     Background="#FF1A1D25"
+                     Foreground="{StaticResource Bright}"
+                     BorderThickness="0"
+                     Padding="12"
+                     TextWrapping="NoWrap"
+                     HorizontalScrollBarVisibility="Auto"
+                     VerticalScrollBarVisibility="Auto" />
+        </Grid>
+
+        <!-- Live measurements and phase progress -->
+        <Grid Grid.Row="2" Margin="0,12,0,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+
+            <StackPanel Grid.Column="0">
+                <ProgressBar x:Name="PhaseProgress"
+                             Height="8"
+                             Minimum="0"
+                             Maximum="1"
+                             Value="0"
+                             Foreground="{StaticResource Good}"
+                             Background="#FF232833"
+                             BorderThickness="0" />
+                <TextBlock x:Name="TrackingText"
+                           Margin="0,8,0,0"
+                           FontFamily="Consolas"
+                           FontSize="12"
+                           Foreground="{StaticResource Muted}"
+                           Text="" />
+            </StackPanel>
+
+            <TextBlock Grid.Column="1"
+                       x:Name="ClockText"
+                       Margin="16,0,0,0"
+                       VerticalAlignment="Center"
+                       FontFamily="Consolas"
+                       FontSize="12"
+                       Foreground="{StaticResource Muted}"
+                       Text="" />
+        </Grid>
+
+        <!-- Actions -->
+        <DockPanel Grid.Row="3" Margin="0,14,0,0" LastChildFill="False">
+            <Button x:Name="PrimaryButton"
+                    DockPanel.Dock="Right"
+                    Content="Start"
+                    Width="150"
+                    Padding="0,7"
+                    IsDefault="True"
+                    IsEnabled="False"
+                    Click="OnPrimaryClick" />
+
+            <Button x:Name="SecondaryButton"
+                    DockPanel.Dock="Right"
+                    Content="Redo phase"
+                    MinWidth="130"
+                    Padding="12,7"
+                    Margin="0,0,10,0"
+                    Visibility="Collapsed"
+                    Click="OnSecondaryClick" />
+
+            <TextBlock x:Name="StatusText"
+                       DockPanel.Dock="Left"
+                       VerticalAlignment="Center"
+                       TextWrapping="Wrap"
+                       MaxWidth="560"
+                       FontSize="12"
+                       Foreground="{StaticResource Muted}"
+                       Text="" />
+        </DockPanel>
+    </Grid>
+</Window>

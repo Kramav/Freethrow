@@ -31,6 +31,32 @@ dotnet run --project demos\Freethrow.Demo.Preview -- --probe
 reports `0 dropped` at about 25 fps or more. If it says camera access is
 denied: Settings → Privacy & security → Camera → allow desktop apps.
 
+**Then measure how well your hand is tracked on this machine and camera.**
+About two minutes, and it decides how to calibrate.
+
+```powershell
+dotnet run --project demos\Freethrow.Demo.Preview -- --hand-test
+```
+
+Seven short phases, each prompted on screen: an open hand and a fist where you
+would use Freethrow, a fist carried side to side, then open and fist again
+closer to the camera and further from it. A phase starts recording when your
+hand is first seen, so getting into position costs nothing; every frame lost
+after that counts. The results give:
+
+- **Fist against open hand at the same distance** — how much confidence closing
+  the hand costs, and whether that cost grows near the camera.
+- **Checks against the gates in the pipeline** — a fist must stay above the
+  0.60 a grab needs, carrying must never lose the grab, an open hand must never
+  grab. The targets follow from the gates; none is validated by data yet.
+- **A comparison** with the previous run on this machine, or with any saved run
+  via `--compare <file>`. Runs are kept in `%LOCALAPPDATA%\Freethrow\hand-tests\`;
+  copy one from another machine to compare cameras.
+
+A **NOTE** that a fist is under the calibration gate means: in step 1, confirm
+corners by **hovering**, not by grabbing. Paste the results either way — they
+are the evidence for where the confidence gates should sit.
+
 ## 1. Calibrate end to end (closes two items)
 
 One wizard run closes both *no spatial profile has ever been produced* and

@@ -57,6 +57,7 @@ dotnet run --project demos\Freethrow.Demo.Preview -- --track [secs]            #
 dotnet run --project demos\Freethrow.Demo.Preview -- --monitors                # displays + mappings
 dotnet run --project demos\Freethrow.Demo.Preview -- --overlay [secs]          # overlay placement
 dotnet run --project demos\Freethrow.Demo.Preview -- --calibrate-grab          # calibration wizard; add --sideways for left-right only
+dotnet run --project demos\Freethrow.Demo.Preview -- --hand-test               # scripted tracking test; --compare f.json
 dotnet run --project demos\Freethrow.Demo.Preview -- --snap f.ftraw            # save one raw frame
 dotnet run --project demos\Freethrow.Demo.Preview -- --landmarks f.ftraw       # track a saved frame
 ```
@@ -66,7 +67,8 @@ dotnet run --project demos\Freethrow.Demo.Preview -- --landmarks f.ftraw       #
 ```
 src/Freethrow.Core/      Platform-agnostic. NEVER references Win32 or WinRT.
   Capture/     FrameRef (pooled), ICameraSource, RawFrameFile
-  Perception/  IHandTracker, HandMetrics, HandTrackingWorker, Onnx/
+  Perception/  IHandTracker, HandMetrics, HandTrackingWorker, Onnx/,
+               TrackingQuality + HandTestReport (--track, --hand-test)
   Gestures/    GestureRecognizer (per hand), HandArbiter
   Spatial/     MappingFit, ScreenMapping, ScreenPoint, Homography,
                HandSpace (pixels -> metres), FrameFit, IdleZone
@@ -74,7 +76,7 @@ src/Freethrow.Core/      Platform-agnostic. NEVER references Win32 or WinRT.
   Config/      GestureProfile, SpatialProfile
 src/Freethrow.Desktop/   All Win32/WinRT. Capture/, Desktop/, Overlay/
 demos/Freethrow.Demo.Preview/   Every capability, runnable
-tests/Freethrow.Core.Tests/     61 tests, no camera or desktop needed
+tests/Freethrow.Core.Tests/     78 tests, no camera or desktop needed
 tools/reference-check/          Regression check against OpenCV's implementation
 ```
 
@@ -90,6 +92,14 @@ M0–M1.7 complete. Capture, hand tracking, gestures, and both halves of calibra
 
 M2 needs `WindowManager` and a `WindowCache`; `MonitorTopology`, the click-through overlay,
 and the hand→screen mapping already exist (pulled forward during M1.6).
+
+**Known defect — fix before M2: a grab does not survive the tracker dropping the hand.**
+`HandTrackingWorker.Forget` discards a hand's recognizer on the frame the tracker stops
+returning it, so `TrackingLossGraceSeconds` never applies to a tracker drop, and the hand is
+re-found under a new id with no grab. One frame of fist confidence under the tracker's 0.50
+drops a carried window. The recognizer's own tests pass because they feed it a missing
+frame directly, which the pipeline never does. `--hand-test` counts these as *dropped by
+the tracker*.
 
 **The mapping can be side-to-side only** (`MappingKind.HorizontalOnly`), for a camera that
 cannot see vertical reach. Its `ScreenPoint.Y` is null, never a stand-in. M2 must hit-test a
@@ -146,7 +156,7 @@ vertical band when `Y` is null, in one named place — see PLAN.md §4 before wr
 
 ## Known unverified
 
-Be honest about these rather than assuming they work. The first five need a person and a
+Be honest about these rather than assuming they work. The first six need a person and a
 webcam; [docs/hardware-checks.md](docs/hardware-checks.md) is the runbook, with pass criteria.
 Do the first three before M2.
 
@@ -163,6 +173,10 @@ Do the first three before M2.
   unsteerable under 10 cm of hand travel, or when the vertical is more than twice as
   sensitive as the horizontal. Both come from "one window per centimetre of tremor", not
   from data. The first check is the held-still band in `Test the mapping`.
+- **No confidence gate was set from a measured fist.** The tracker keeps a hand above 0.50,
+  a grab needs 0.60, calibration and acquiring need 0.70 — and a fist hides its fingers and
+  scores lower than an open hand. `--hand-test` measures fist against open hand at three
+  distances; its results decide where the gates belong.
 - **"Side to side survives lid tilt" is reasoning, not a measurement.** Tilting rotates the
   camera about a horizontal axis, which should move the image vertically and barely
   sideways. It is the strongest argument for the mode on a laptop and has never been tried.
