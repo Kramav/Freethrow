@@ -8,6 +8,7 @@ using Freethrow.Core.Diagnostics;
 using Freethrow.Core.Gestures;
 using Freethrow.Core.Perception;
 using Freethrow.Core.Perception.Onnx;
+using Freethrow.Core.Spatial;
 using Freethrow.Desktop.Capture;
 using Freethrow.Desktop.Desktop;
 using Freethrow.Desktop.Overlay;
@@ -380,19 +381,74 @@ internal static class Program
         int grabs = 0;
         int twoHandFrames = 0;
 
+        // Collected on the worker thread, read once capture has stopped. Confidence is split
+        // by hand shape because a fist hides its fingers and scores lower than an open hand,
+        // and every gate that acts on confidence was set without measuring that difference.
+        var statsGate = new object();
+        var confidenceByShape = new Dictionary<string, List<float>>
+        {
+            ["closed"] = [],
+            ["in between"] = [],
+            ["open"] = [],
+        };
+        var viewWidths = new List<float>();
+        var holding = new HashSet<int>();
+        int released = 0;
+        int droppedByTracker = 0;
+        int pastGrace = 0;
+
         void OnResult(object? sender, HandTrackingResult result)
         {
-            foreach (TrackedHand hand in result.Hands)
+            lock (statsGate)
             {
-                if (hand.Gesture.GrabStarted)
+                foreach (TrackedHand hand in result.Hands)
                 {
-                    grabs++;
-                }
-            }
+                    if (hand.Gesture.GrabStarted)
+                    {
+                        grabs++;
+                    }
 
-            if (result.Hands.Count > 1)
-            {
-                twoHandFrames++;
+                    if (hand.Gesture.GrabAborted)
+                    {
+                        pastGrace++;
+                    }
+                    else if (hand.Gesture.GrabEnded)
+                    {
+                        released++;
+                    }
+
+                    // Raw, not the recognizer's smoothed openness: that stops updating below
+                    // its confidence gate, which is exactly the frames being measured.
+                    float openness = HandMetrics.Openness(hand.Pose);
+                    string shape = openness <= gestureOptions.GrabOpenness ? "closed"
+                        : openness >= gestureOptions.ReleaseOpenness ? "open"
+                        : "in between";
+                    confidenceByShape[shape].Add(hand.Pose.Confidence);
+
+                    if (hand.DepthProxy > 0)
+                    {
+                        viewWidths.Add(result.FrameWidth / hand.DepthProxy);
+                    }
+                }
+
+                // A hand the tracker drops takes its recognizer with it on the same frame, so
+                // its grab never reports as aborted — it simply stops appearing. Counted here,
+                // or that way of losing a grab would be invisible.
+                droppedByTracker += holding.Count(id => !result.Hands.Any(hand => hand.Id == id));
+
+                holding.Clear();
+                foreach (TrackedHand hand in result.Hands)
+                {
+                    if (hand.Gesture.State == GestureState.Grab)
+                    {
+                        holding.Add(hand.Id);
+                    }
+                }
+
+                if (result.Hands.Count > 1)
+                {
+                    twoHandFrames++;
+                }
             }
         }
 
@@ -424,7 +480,8 @@ internal static class Program
                 ? "  no hands                                             "
                 : "  " + string.Join("  ", latest.Hands.Select(hand =>
                     $"[{hand.Id} {(hand.Id == latest.ControllingId ? "HOLD" : hand.Id == latest.HoverId ? "point" : "idle")}"
-                    + $" open {hand.Gesture.Openness:0.00} near {hand.DepthProxy:0}]"));
+                    + $" open {hand.Gesture.Openness:0.00} conf {hand.Pose.Confidence:0.00}"
+                    + $" sees {(hand.DepthProxy > 0 ? latest.FrameWidth / hand.DepthProxy * 100 : 0):0} cm]"));
 
             // Overwrite in place on a console, but write plain lines when redirected —
             // carriage returns turn a captured log into one unreadable smear.
@@ -449,7 +506,25 @@ internal static class Program
         Console.WriteLine($"inference  : {worker.InferenceMilliseconds:0.0} ms mean, "
             + $"{worker.WorstInferenceMilliseconds:0.0} ms worst");
         Console.WriteLine($"model runs : {tracker.DetectionRuns} detection, {tracker.TrackingRuns} tracking");
-        Console.WriteLine($"grabs      : {grabs}");
+        lock (statsGate)
+        {
+            Console.WriteLine($"grabs      : {grabs} started, {released} released, "
+                + $"{droppedByTracker + pastGrace} lost ({droppedByTracker} dropped by the tracker, "
+                + $"{pastGrace} past the {gestureOptions.TrackingLossGraceSeconds:0.00} s grace)");
+
+            Console.WriteLine("confidence : by hand shape; frames the tracker dropped are not counted");
+            foreach ((string shape, List<float> values) in confidenceByShape)
+            {
+                Console.WriteLine($"  {shape,-10}  {DescribeConfidence(values, gestureOptions.MinConfidence)}");
+            }
+
+            if (viewWidths.Count > 0)
+            {
+                float[] widths = [.. viewWidths.Order()];
+                Console.WriteLine($"view width : the camera sees {Percentile(widths, 0.5f) * 100:0} cm across "
+                    + $"at your hand (middle 80%: {Percentile(widths, 0.1f) * 100:0}–{Percentile(widths, 0.9f) * 100:0} cm)");
+            }
+        }
 
         // Frames with no hand at all legitimately run the detector every time — there is
         // nothing else to do. Only detections beyond those indicate a tracking loop that
@@ -469,6 +544,29 @@ internal static class Program
 
         return 0;
     }
+
+    /// <summary>
+    /// Summarises confidence for one hand shape against the two gates that act on it.
+    /// </summary>
+    private static string DescribeConfidence(List<float> values, float gestureGate)
+    {
+        if (values.Count == 0)
+        {
+            return "no frames";
+        }
+
+        float[] sorted = [.. values.Order()];
+        return $"{sorted.Length,5} frames  median {Percentile(sorted, 0.5f):0.00}  min {sorted[0]:0.00}  "
+            + $"under {gestureGate:0.00} (grab ignores it) {Share(sorted, gestureGate):0%}  "
+            + $"under {CalibrationWindow.MinimumConfidence:0.00} (calibration refuses it) "
+            + $"{Share(sorted, CalibrationWindow.MinimumConfidence):0%}";
+    }
+
+    private static float Percentile(float[] sorted, float fraction) =>
+        sorted[(int)MathF.Round(fraction * (sorted.Length - 1))];
+
+    private static double Share(float[] sorted, float threshold) =>
+        sorted.Count(value => value < threshold) / (double)sorted.Length;
 
     /// <summary>
     /// Lists the attached displays and whether each has a spatial calibration.
@@ -500,6 +598,12 @@ internal static class Program
 
             if (mapping is not null)
             {
+                Console.WriteLine($"    kind   : {mapping.Kind switch
+                {
+                    MappingKind.Homography => "full screen (both axes)",
+                    MappingKind.HorizontalOnly => "side to side only (height not measured)",
+                }}");
+
                 Console.WriteLine($"    idle   : {(mapping.Idle is { } idle
                     ? $"({idle.Centre.X * 100:0}, {idle.Centre.Y * 100:0}) cm from frame centre, radius {idle.Radius * 100:0} cm"
                     : "out of frame")}");
@@ -558,11 +662,16 @@ internal static class Program
             Console.WriteLine($"showing on {monitor.DeviceName} ({monitor.Width}x{monitor.Height} "
                 + $"at {monitor.Left},{monitor.Top}, {monitor.Dpi} DPI)");
 
+            // Every spot a calibration can ask for, so the side-to-side marks are checked for
+            // placement the same way the corners are.
+            Spot[] spots = Enum.GetValues<Spot>();
+
             overlay.ShowOn(monitor);
-            overlay.SetShowAllCorners(true);
-            overlay.SetTarget(index - 1 < 4 ? index - 1 : 0);
-            overlay.SetPointer(new Vector2(0.5f, 0.5f));
-            overlay.SetCaption($"{monitor.Description}\nmarkers should sit just inside each corner");
+            overlay.SetTargets(spots);
+            overlay.SetTarget(spots[(index - 1) % spots.Length]);
+            overlay.SetPointer(ScreenPoint.At(0.5f, 0.5f));
+            overlay.SetCaption($"{monitor.Description}\nmarkers should sit just inside each corner "
+                + "and halfway down each side");
 
             overlay.Dispatcher.BeginInvoke(
                 System.Windows.Threading.DispatcherPriority.Loaded,
@@ -596,9 +705,15 @@ internal static class Program
     /// </remarks>
     private static int RunCalibration(string[] args)
     {
-        string? profilePath = args.Length > 1 ? args[1] : null;
+        // The flag may sit anywhere after the command. Taking args[1] as the path, as this
+        // once did, would read "--calibrate-grab --sideways" as a profile saved to a file
+        // called "--sideways".
+        string[] rest = args[1..];
+        ReachMode? reach = rest.Contains("--sideways") ? ReachMode.SideToSide : null;
+        string? profilePath = rest.FirstOrDefault(arg => !arg.StartsWith("--", StringComparison.Ordinal));
+
         var application = new Application { ShutdownMode = ShutdownMode.OnMainWindowClose };
-        return application.Run(new CalibrationWindow(profilePath));
+        return application.Run(new CalibrationWindow(profilePath, reach: reach));
     }
 
     private static int PrintUsage(int exitCode)
@@ -613,7 +728,10 @@ internal static class Program
         Console.WriteLine("  --snap [path] [index]       save one frame uncompressed, for replay");
         Console.WriteLine("  --landmarks <path>          run the tracker over a saved frame");
         Console.WriteLine("  --track [seconds] [index]   track a hand live and report the cost");
-        Console.WriteLine("  --calibrate-grab [path]     fit grab thresholds to your own hand");
+        Console.WriteLine("  --calibrate-grab [--sideways] [path]");
+        Console.WriteLine("                              fit grab thresholds and the screen mapping to");
+        Console.WriteLine("                              your own hand; --sideways maps left-to-right only,");
+        Console.WriteLine("                              for a camera that cannot see vertical reach");
         Console.WriteLine();
         Console.WriteLine("Index comes from --list. Without one, the first colour camera is used.");
         return exitCode;

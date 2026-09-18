@@ -37,14 +37,54 @@ One wizard run closes both *no spatial profile has ever been produced* and
 *`MaxViewAxisAlignment` fell back to its default*. It calibrates the **primary**
 monitor.
 
+**First, find where the camera can actually see your hand.** Two minutes, and
+it decides how you calibrate. Skipping it is how the bottom corners got hit
+twice: the wizard has no way to know your reach leaves the view until you are
+already stuck on a step that cannot finish.
+
 ```powershell
-dotnet run --project demos\Freethrow.Demo.Preview -- --calibrate-grab
+dotnet run --project demos\Freethrow.Demo.Preview
 ```
 
-Nine steps: open hand, fist, pointing at the camera, idle position, four
-corners (markers appear on the monitor), and a maximum-reach sweep. Nothing
-starts until you press **Start capturing**. The bar fills only on frames where
-your hand is tracked, 45 frames per pose.
+Sit as you would to use Freethrow and reach out comfortably. Move your hand
+around and note where the skeleton holds and where it drops. That region is
+the most your working area can be, and the corners have to fit inside it. A
+camera in a laptop lid is aimed at your face, so it usually sees a band at
+chest-to-head height and nothing toward the desk.
+
+Then choose:
+
+- **Four corners fit inside what you found**, even as a smaller, higher
+  rectangle than you would naturally reach: calibrate **full screen**, which
+  maps both axes.
+
+  ```powershell
+  dotnet run --project demos\Freethrow.Demo.Preview -- --calibrate-grab
+  ```
+
+- **A bottom corner cannot be reached without leaving the view**: calibrate
+  **side to side**. Only left-to-right is mapped; height is not measured, and
+  nothing downstream guesses at it.
+
+  ```powershell
+  dotnet run --project demos\Freethrow.Demo.Preview -- --calibrate-grab --sideways
+  ```
+
+The mode can also be changed in the window under **Working area**, up until the
+first reach step. After a side-to-side calibration, the next run starts in side
+to side by itself.
+
+Nine steps, or seven side to side: open hand, fist, pointing at the camera,
+idle position, then four corners or a left and a right point (markers appear
+on the monitor), then a maximum-reach sweep. Nothing starts until you press
+**Start capturing**. The bar fills only on frames where your hand is tracked,
+45 frames per pose.
+
+**Side to side, height does not matter on the reach steps.** Reach left and
+right at whatever height stays in view. Aiming for the marker's height, halfway
+down the screen, is what takes a hand out of a lid camera's view. If the line
+under the video says your hand left at the top or bottom, just raise or lower
+it.
 
 **Your working area does not need to be centred in the camera's view**, but it
 does need to be *inside* it. On the pose steps the bar stops while any part of
@@ -67,13 +107,21 @@ On the results screen:
 |---|---|---|
 | `no grab past view X.XX` | anything **except `0.55`** | `0.55` is the built-in default. Pointing did not separate from flat by 0.1, or tracked fewer than 15 frames. Start over and take more care over step 3. |
 | a line about where hands rest | either "out of the camera's view" or a position — both are fine | — |
-| a warning that a corner or the maximum reach was at the camera's edge | no such warning | redo that corner with a shorter reach, or aim the camera toward your working area and start over. A clipped corner is where the camera stopped seeing, not where you reached |
+| what was fitted: *Full two-axis mapping* or *Side-to-side mapping* | the mode you chose | You chose full screen but it says *fitted side to side only*: your corners were too flat for height to be steerable, and it gives the numbers. That is a real result, not a failure. Keep it, or start over with more vertical reach |
+| a warning that a corner or the maximum reach was at the camera's edge | no such warning | redo that corner with a shorter reach, or aim the camera toward your working area and start over. A clipped corner is where the camera stopped seeing, not where you reached. Side to side, the top and bottom of the view are expected and are not warned about |
 
 Then press **Test the mapping**:
 
-- Reach toward each corner. **The dot lands on that marker.**
-- Hold your hand still and lean toward the camera, then back. **The dot stays
+- **Full screen:** reach toward each corner. **The dot lands on that marker.**
+  Hold your hand still and lean toward the camera, then back. **The dot stays
   put.** This is the depth invariance the whole mapping rests on.
+- **Side to side:** the pointer is a **band** the height of the screen, not a
+  dot, because a dot would claim a height nothing measured. Reach left and
+  right: **the band lands on each marker**. Lean toward the camera and back:
+  **the band stays put.** Hold your hand still: **the band stays within about
+  one window's width.** That is the first real measurement of the thresholds
+  that decide when height is too cramped to use. If it wanders further, note
+  how far.
 
 Press **Save profile**, then confirm:
 
@@ -82,8 +130,18 @@ dotnet run --project demos\Freethrow.Demo.Preview -- --monitors
 Get-Content $env:LOCALAPPDATA\Freethrow\gesture-profile.json
 ```
 
-**Pass:** the primary monitor shows `mapping: calibrated <today>` and an
-`idle` line, and `MaxViewAxisAlignment` in the JSON is not `0.55`.
+**Pass:** the primary monitor shows `mapping: calibrated <today>`, a `kind`
+line naming the mode you chose, and an `idle` line; `MaxViewAxisAlignment` in
+the JSON is not `0.55`.
+
+**Laptop lid camera — does the calibration survive the lid?** A mapping is
+fitted to one camera position, and tilting the lid moves the camera, so expect
+a full-screen profile to go stale whenever you adjust the screen. A side-to-side
+one *should* mostly survive: tilting turns the camera about a horizontal axis,
+which moves the image up and down but barely sideways. That is reasoning, not
+yet a measurement. In **Test the mapping**, hold your hand still, note where the
+pointer sits, tilt the lid 5–10°, and look again. Write down whether it moved
+and roughly how far. It goes in CLAUDE.md either way.
 
 **One measurement while you are here.** On step 3, note `view` while pointing
 at the lens from the middle of the frame, then again from near a side edge
@@ -114,7 +172,7 @@ then close the right as well. Open both. Now close the right first.
 dotnet run --project demos\Freethrow.Demo.Preview -- --track 30
 ```
 
-**Pass**, reading the live line (`[id HOLD|point|idle open … near …]`). The
+**Pass**, reading the live line (`[id HOLD|point|idle open … conf … sees …]`). The
 line names hands by id, not left or right (handedness is unreliable), so
 first note which id is which hand:
 
@@ -160,5 +218,8 @@ openness or the view angle is at fault.
 
 - All passed → tick the three items in CLAUDE.md with the output. M2 is clear
   to start.
+- Calibrated side to side → a supported result, and M2 can be built on it. But
+  judge how M2 *feels* on a camera that sees both axes: in one dimension you
+  cannot tell a bad design from the missing axis.
 - Calibration felt wrong for a second person → note it. The shipped defaults
   came from one hand.

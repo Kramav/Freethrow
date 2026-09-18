@@ -56,7 +56,7 @@ dotnet run --project demos\Freethrow.Demo.Preview -- --probe [i] [secs] [sub]  #
 dotnet run --project demos\Freethrow.Demo.Preview -- --track [secs]            # tracking + arbitration
 dotnet run --project demos\Freethrow.Demo.Preview -- --monitors                # displays + mappings
 dotnet run --project demos\Freethrow.Demo.Preview -- --overlay [secs]          # overlay placement
-dotnet run --project demos\Freethrow.Demo.Preview -- --calibrate-grab          # calibration wizard
+dotnet run --project demos\Freethrow.Demo.Preview -- --calibrate-grab          # calibration wizard; add --sideways for left-right only
 dotnet run --project demos\Freethrow.Demo.Preview -- --snap f.ftraw            # save one raw frame
 dotnet run --project demos\Freethrow.Demo.Preview -- --landmarks f.ftraw       # track a saved frame
 ```
@@ -68,12 +68,13 @@ src/Freethrow.Core/      Platform-agnostic. NEVER references Win32 or WinRT.
   Capture/     FrameRef (pooled), ICameraSource, RawFrameFile
   Perception/  IHandTracker, HandMetrics, HandTrackingWorker, Onnx/
   Gestures/    GestureRecognizer (per hand), HandArbiter
-  Spatial/     Homography, HandSpace (pixels -> metres), FrameFit, IdleZone
+  Spatial/     MappingFit, ScreenMapping, ScreenPoint, Homography,
+               HandSpace (pixels -> metres), FrameFit, IdleZone
   Filters/     OneEuroFilter
   Config/      GestureProfile, SpatialProfile
 src/Freethrow.Desktop/   All Win32/WinRT. Capture/, Desktop/, Overlay/
 demos/Freethrow.Demo.Preview/   Every capability, runnable
-tests/Freethrow.Core.Tests/     45 tests, no camera or desktop needed
+tests/Freethrow.Core.Tests/     61 tests, no camera or desktop needed
 tools/reference-check/          Regression check against OpenCV's implementation
 ```
 
@@ -88,7 +89,11 @@ M0–M1.7 complete. Capture, hand tracking, gestures, and both halves of calibra
 **M2 is next: the window layer** — nothing moves a window yet.
 
 M2 needs `WindowManager` and a `WindowCache`; `MonitorTopology`, the click-through overlay,
-and the hand→screen homography already exist (pulled forward during M1.6).
+and the hand→screen mapping already exist (pulled forward during M1.6).
+
+**The mapping can be side-to-side only** (`MappingKind.HorizontalOnly`), for a camera that
+cannot see vertical reach. Its `ScreenPoint.Y` is null, never a stand-in. M2 must hit-test a
+vertical band when `Y` is null, in one named place — see PLAN.md §4 before writing hover.
 
 ## Gotchas that cost real debugging time
 
@@ -117,6 +122,12 @@ and the hand→screen homography already exist (pulled forward during M1.6).
 - **PowerShell is DPI-unaware**, so `SystemInformation.VirtualScreen` under-reports on a
   scaled display and screenshots capture only part of the screen. Use explicit physical
   bounds when verifying overlay placement, or you will "find" bugs that are not there.
+- **A laptop lid is not a camera mount.** The spatial mapping is fitted to one camera pose,
+  and tilting the lid moves the camera, so a full-screen profile goes stale every time the
+  screen angle changes. A lid camera is also aimed at the face, so reaching for a bottom
+  corner can leave its view entirely and that wizard step can never finish. Scout the
+  visible area in the preview before calibrating, and use `--sideways` if the bottom
+  corners are out of reach.
 
 ## Conventions
 
@@ -135,9 +146,9 @@ and the hand→screen homography already exist (pulled forward during M1.6).
 
 ## Known unverified
 
-Be honest about these rather than assuming they work. The first three need a person and a
+Be honest about these rather than assuming they work. The first five need a person and a
 webcam; [docs/hardware-checks.md](docs/hardware-checks.md) is the runbook, with pass criteria.
-Do them before M2.
+Do the first three before M2.
 
 - **The two-hand path has never been tested with two real hands.** It is correct on a static
   two-hand image (`--landmarks` reports `hands: 2`) and the arbitration logic is covered by
@@ -148,6 +159,13 @@ Do them before M2.
 - **`MaxViewAxisAlignment` fell back to its default** in the one real profile produced so far,
   meaning the pointing-at-camera phase did not separate cleanly. The posture gate is running
   on a guess, not a measurement.
+- **The side-to-side thresholds are derived, not measured.** `MappingFit` treats an axis as
+  unsteerable under 10 cm of hand travel, or when the vertical is more than twice as
+  sensitive as the horizontal. Both come from "one window per centimetre of tremor", not
+  from data. The first check is the held-still band in `Test the mapping`.
+- **"Side to side survives lid tilt" is reasoning, not a measurement.** Tilting rotates the
+  camera about a horizontal axis, which should move the image vertically and barely
+  sideways. It is the strongest argument for the mode on a laptop and has never been tried.
 - **Infrared capture is weak on the reference machine**: ~4.8 fps in a burst, decaying to
   ~0.6, because the Hello illuminator idles outside authentication. May differ on other
   hardware; it is opt-in and nothing depends on it.

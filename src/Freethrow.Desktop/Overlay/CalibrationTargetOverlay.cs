@@ -1,8 +1,8 @@
-using System.Numerics;
 using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Interop;
 using System.Windows.Media;
+using Freethrow.Core.Spatial;
 using Freethrow.Desktop.Desktop;
 
 namespace Freethrow.Desktop.Overlay;
@@ -77,18 +77,22 @@ public sealed class CalibrationTargetOverlay : Window
         Reposition();
     }
 
-    /// <summary>Highlights one of the four corners, or none.</summary>
-    /// <param name="cornerIndex">0 top-left, 1 top-right, 2 bottom-right, 3 bottom-left.</param>
-    public void SetTarget(int? cornerIndex) => _surface.SetTarget(cornerIndex);
+    /// <summary>The marks to draw for this calibration. The four corners until told otherwise.</summary>
+    public void SetTargets(IReadOnlyList<Spot> spots) => _surface.SetTargets(spots);
 
-    /// <summary>Places the live pointer dot, in normalised screen coordinates.</summary>
-    public void SetPointer(Vector2? normalised) => _surface.SetPointer(normalised);
+    /// <summary>Highlights one of the marks, or none.</summary>
+    public void SetTarget(Spot? spot) => _surface.SetTarget(spot);
+
+    /// <summary>Places the live pointer, or hides it with <see cref="ScreenPoint.Nothing"/>.</summary>
+    /// <remarks>
+    /// A point with no vertical component draws as a full-height band rather than a dot. A
+    /// dot would put the hand at a height nothing measured, and the test screen exists to
+    /// show what the mapping actually knows.
+    /// </remarks>
+    public void SetPointer(ScreenPoint point) => _surface.SetPointer(point);
 
     /// <summary>Sets the caption drawn across the middle of the screen.</summary>
     public void SetCaption(string caption) => _surface.SetCaption(caption);
-
-    /// <summary>Whether all four corner marks are drawn, rather than just the active one.</summary>
-    public void SetShowAllCorners(bool showAll) => _surface.SetShowAllCorners(showAll);
 
     private void OnSourceInitialized(object? sender, EventArgs e)
     {
@@ -153,38 +157,41 @@ public sealed class CalibrationTargetOverlay : Window
         private static readonly Brush IdleBrush = Frozen(Color.FromArgb(0xBB, 0xC8, 0xD2, 0xE0));
         private static readonly Brush ActiveBrush = Frozen(Color.FromArgb(0xFF, 0x4A, 0xDE, 0x80));
         private static readonly Brush PointerBrush = Frozen(Color.FromArgb(0xFF, 0xF2, 0xA6, 0x5A));
+        private static readonly Brush BandBrush = Frozen(Color.FromArgb(0x55, 0xF2, 0xA6, 0x5A));
         private static readonly Brush CaptionBrush = Frozen(Color.FromArgb(0xEE, 0xE8, 0xED, 0xF5));
         private static readonly Brush ShadeBrush = Frozen(Color.FromArgb(0x40, 0x00, 0x00, 0x00));
 
         private static readonly Pen IdlePen = FrozenPen(IdleBrush, 2);
         private static readonly Pen ActivePen = FrozenPen(ActiveBrush, 4);
+        private static readonly Pen BandPen = FrozenPen(PointerBrush, 3);
 
-        private int? _target;
-        private Vector2? _pointer;
+        private IReadOnlyList<Spot> _spots = [Spot.TopLeft, Spot.TopRight, Spot.BottomRight, Spot.BottomLeft];
+        private Spot? _target;
+        private ScreenPoint _pointer;
         private string _caption = string.Empty;
-        private bool _showAllCorners = true;
 
-        public void SetTarget(int? cornerIndex)
+        public void SetTargets(IReadOnlyList<Spot> spots)
         {
-            _target = cornerIndex;
+            ArgumentNullException.ThrowIfNull(spots);
+            _spots = [.. spots];
             InvalidateVisual();
         }
 
-        public void SetPointer(Vector2? normalised)
+        public void SetTarget(Spot? spot)
         {
-            _pointer = normalised;
+            _target = spot;
+            InvalidateVisual();
+        }
+
+        public void SetPointer(ScreenPoint point)
+        {
+            _pointer = point;
             InvalidateVisual();
         }
 
         public void SetCaption(string caption)
         {
             _caption = caption ?? string.Empty;
-            InvalidateVisual();
-        }
-
-        public void SetShowAllCorners(bool showAll)
-        {
-            _showAllCorners = showAll;
             InvalidateVisual();
         }
 
@@ -204,30 +211,29 @@ public sealed class CalibrationTargetOverlay : Window
             drawingContext.DrawRectangle(ShadeBrush, null, new Rect(0, 0, width, height));
 
             double inset = Math.Min(width, height) * InsetFraction;
-            Point[] corners =
-            [
-                new(inset, inset),
-                new(width - inset, inset),
-                new(width - inset, height - inset),
-                new(inset, height - inset),
-            ];
 
-            for (int i = 0; i < corners.Length; i++)
+            foreach (Spot spot in _spots)
             {
-                bool active = _target == i;
-                if (!active && !_showAllCorners)
-                {
-                    continue;
-                }
-
-                DrawTarget(drawingContext, corners[i], active);
+                DrawTarget(drawingContext, Place(spot, width, height, inset), spot == _target);
             }
 
-            if (_pointer is { } pointer)
+            if (_pointer.IsMapped)
             {
-                var position = new Point(pointer.X * width, pointer.Y * height);
-                drawingContext.DrawEllipse(PointerBrush, null, position, 14, 14);
-                drawingContext.DrawEllipse(null, FrozenPen(CaptionBrush, 2), position, 22, 22);
+                double x = _pointer.X * width;
+
+                if (_pointer.Y is { } y)
+                {
+                    var position = new Point(x, y * height);
+                    drawingContext.DrawEllipse(PointerBrush, null, position, 14, 14);
+                    drawingContext.DrawEllipse(null, FrozenPen(CaptionBrush, 2), position, 22, 22);
+                }
+                else
+                {
+                    // No height was measured, so the pointer is a column, not a point. A dot
+                    // at mid-height would look like a reading and would be believed.
+                    drawingContext.DrawRectangle(BandBrush, null, new Rect(x - 10, 0, 20, height));
+                    drawingContext.DrawLine(BandPen, new Point(x, 0), new Point(x, height));
+                }
             }
 
             if (_caption.Length > 0)
@@ -235,6 +241,16 @@ public sealed class CalibrationTargetOverlay : Window
                 DrawCaption(drawingContext, width, height);
             }
         }
+
+        private static Point Place(Spot spot, double width, double height, double inset) => spot switch
+        {
+            Spot.TopLeft => new(inset, inset),
+            Spot.TopRight => new(width - inset, inset),
+            Spot.BottomRight => new(width - inset, height - inset),
+            Spot.BottomLeft => new(inset, height - inset),
+            Spot.MidLeft => new(inset, height / 2),
+            Spot.MidRight => new(width - inset, height / 2),
+        };
 
         private static void DrawTarget(DrawingContext drawingContext, Point centre, bool active)
         {

@@ -110,6 +110,23 @@
                           SelectionChanged="OnConfirmationModeChanged" />
             </StackPanel>
 
+            <!-- Shown only before the first reach step: the mode decides which steps follow. -->
+            <StackPanel x:Name="ReachPanel"
+                        DockPanel.Dock="Left"
+                        Orientation="Horizontal"
+                        VerticalAlignment="Center"
+                        Visibility="Collapsed">
+                <TextBlock Text="Working area"
+                           VerticalAlignment="Center"
+                           Margin="0,0,8,0"
+                           FontSize="12"
+                           Foreground="{StaticResource Muted}" />
+                <ComboBox x:Name="ReachModeBox"
+                          Width="200"
+                          VerticalAlignment="Center"
+                          SelectionChanged="OnReachModeChanged" />
+            </StackPanel>
+
             <Button x:Name="PrimaryButton"
                     DockPanel.Dock="Right"
                     Content="Start capturing"

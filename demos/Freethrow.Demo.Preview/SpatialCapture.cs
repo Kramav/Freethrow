@@ -22,6 +22,20 @@ public enum CornerConfirmation
     KeyPress,
 }
 
+/// <summary>How much of the screen a calibration maps.</summary>
+public enum ReachMode
+{
+    /// <summary>Four corners, both axes: for a camera that can see the whole working area.</summary>
+    FullScreen,
+
+    /// <summary>
+    /// Two points, left and right: for a camera that cannot see vertical reach, such as one
+    /// in a laptop lid aimed at the face, where reaching for a bottom corner leaves the view
+    /// entirely and the step can never complete.
+    /// </summary>
+    SideToSide,
+}
+
 /// <summary>
 /// Collects samples for one corner until enough agree.
 /// </summary>
@@ -138,7 +152,7 @@ internal sealed class PointCapture(CornerConfirmation mode, int target = 20)
 /// is a sweep rather than four more held corners — and why it is measured once rather
 /// than per monitor: it is a property of the arm, not of a screen.
 /// </remarks>
-internal sealed class SweepCapture(int target = 90)
+internal sealed class SweepCapture(int target = 90, bool requireVertical = true)
 {
     private Vector2 _min = new(float.MaxValue);
     private Vector2 _max = new(float.MinValue);
@@ -147,7 +161,13 @@ internal sealed class SweepCapture(int target = 90)
 
     public int Target { get; } = target;
 
-    public bool IsComplete => Count >= Target && Extent.X > 0.05f && Extent.Y > 0.05f;
+    /// <remarks>
+    /// Vertical extent is optional because a side-to-side calibration exists for a camera
+    /// that cannot see vertical hand travel. Requiring it there stalls this step exactly the
+    /// way the bottom corners stalled — the same never-completes failure, one step later.
+    /// </remarks>
+    public bool IsComplete =>
+        Count >= Target && Extent.X > 0.05f && (!requireVertical || Extent.Y > 0.05f);
 
     public Vector2 Min => _min;
 
@@ -235,48 +255,45 @@ internal sealed class IdleCapture(int target = 60)
     public IdleZone Result => IdleZone.Fit(_samples);
 }
 
-/// <summary>Turns captured corners into a stored monitor mapping.</summary>
+/// <summary>Turns captured reach points into a stored monitor mapping.</summary>
 internal static class SpatialCalibration
 {
     /// <summary>
-    /// Fits the transform taking the four captured hand positions onto the monitor.
+    /// Fits the best mapping the captured reach points support, for one monitor.
     /// </summary>
-    /// <param name="corners">Captured positions in metres: top-left, top-right, bottom-right, bottom-left.</param>
+    /// <param name="reach">
+    /// Captured positions in metres: four corners (top-left, top-right, bottom-right,
+    /// bottom-left), or two points (left, right) for side to side.
+    /// </param>
     /// <param name="idle">Where the hands rest, or null if they rest out of frame.</param>
     /// <param name="monitor">The monitor being mapped.</param>
-    public static (MonitorMapping? Mapping, string? Problem) Fit(
-        IReadOnlyList<Vector2> corners,
+    /// <returns>The mapping and what was fitted, or the reason none could be.</returns>
+    public static (MonitorMapping? Mapping, string? Explanation, string? Problem) Fit(
+        IReadOnlyList<Vector2> reach,
         IdleZone? idle,
         MonitorInfo monitor)
     {
-        ArgumentNullException.ThrowIfNull(corners);
+        ArgumentNullException.ThrowIfNull(reach);
         ArgumentNullException.ThrowIfNull(monitor);
 
-        // Map onto the unit square rather than pixels, so a resolution change does not
-        // invalidate the calibration — only the monitor's shape would.
-        Vector2[] destination =
-        [
-            new(0, 0),
-            new(1, 0),
-            new(1, 1),
-            new(0, 1),
-        ];
+        (ScreenMapping? fitted, string? explanation, string? problem) =
+            MappingFit.Fit(reach, monitor.Width, monitor.Height);
 
-        (Homography? transform, string? problem) = Homography.TryFit(corners, destination);
-        if (transform is null)
+        if (fitted is null)
         {
-            return (null, problem);
+            return (null, null, problem);
         }
 
         return (new MonitorMapping(
             monitor.DeviceName,
             monitor.Description,
-            transform.ToArray(),
+            fitted.ToArray(),
             idle,
-            [.. corners.Select(Point2.From)],
+            [.. reach.Select(Point2.From)],
             monitor.Width,
             monitor.Height,
-            DateTimeOffset.UtcNow), null);
+            DateTimeOffset.UtcNow,
+            fitted.Kind), explanation, null);
     }
 
     /// <summary>
@@ -294,10 +311,12 @@ internal static class SpatialCalibration
             return "Hands rest out of the camera's view.";
         }
 
-        Vector2 onScreen = mapping.ToHomography().Map(idle.Centre.ToVector());
-        string where = float.IsNaN(onScreen.X) || float.IsNaN(onScreen.Y)
+        ScreenPoint onScreen = mapping.ToMapping().Map(idle.Centre.ToVector());
+        string where = !onScreen.IsMapped
             ? "off the mapped area"
-            : $"at ({onScreen.X:0.00}, {onScreen.Y:0.00}) on the screen's 0–1 scale";
+            : onScreen.Y is { } y
+                ? $"at ({onScreen.X:0.00}, {y:0.00}) on the screen's 0–1 scale"
+                : $"{onScreen.X:0.00} of the way across the screen (height is not measured)";
 
         return $"Hands rest {where}, within {idle.Radius * 100:0} cm. "
             + "Once windows can be moved (M2), a hand that appears there will not hover until it leaves.";

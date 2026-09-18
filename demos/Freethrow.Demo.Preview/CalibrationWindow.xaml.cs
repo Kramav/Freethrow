@@ -39,7 +39,10 @@ namespace Freethrow.Demo.Preview;
 public partial class CalibrationWindow : Window
 {
     private const int SamplesPerPose = 45;
-    private const float MinimumConfidence = 0.7f;
+
+    /// <summary>Landmark confidence a frame needs before it counts as a calibration sample.</summary>
+    /// <remarks>Internal so <c>--track</c> can report how often a hand falls under it.</remarks>
+    internal const float MinimumConfidence = 0.7f;
     private const string IdleCapturingHint = "Rest your hands as you normally would. The bar fills while they're tracked.";
     private const string IdleSkipLabel = "My hands are out of frame";
 
@@ -49,14 +52,20 @@ public partial class CalibrationWindow : Window
     /// </summary>
     private static readonly TimeSpan IdleSkipPrompt = TimeSpan.FromSeconds(3);
 
-    private static readonly string[] CornerNames = ["top-left", "top-right", "bottom-right", "bottom-left"];
-
     private readonly WindowsCameraEnumerator _enumerator = new();
     private readonly Dictionary<string, CalibrationPhase> _poses = [];
-    private readonly List<(Vector2 Position, FrameEdge Edges)> _corners = [];
+
+    /// <summary>
+    /// Captured reach points, each tagged with the spot it was captured for. Tagged rather
+    /// than positional so that redoing a step, or a mode with a different number of points,
+    /// cannot misname one or feed the fit out of order.
+    /// </summary>
+    private readonly List<(Spot Target, Vector2 Position, FrameEdge Edges)> _corners = [];
+
     private readonly object _gate = new();
     private readonly string? _gesturePath;
     private readonly string? _spatialPath;
+    private readonly ReachMode? _requestedReach;
 
     private ICameraSource? _source;
     private IHandTracker? _tracker;
@@ -69,6 +78,7 @@ public partial class CalibrationWindow : Window
     private WizardStep[] _steps = [];
     private int _stepIndex;
     private Mode _mode = Mode.Preparing;
+    private ReachMode _reachMode;
 
     private CalibrationPhase? _recordingPose;
     private IdleCapture? _recordingIdle;
@@ -86,12 +96,19 @@ public partial class CalibrationWindow : Window
     private GestureProfile? _fittedGesture;
     private MonitorMapping? _fittedMapping;
     private SweepCapture? _reach;
-    private Homography? _testTransform;
+    private ScreenMapping? _testMapping;
 
-    public CalibrationWindow(string? gesturePath = null, string? spatialPath = null)
+    /// <param name="gesturePath">Where to save the grab thresholds, or null for the default.</param>
+    /// <param name="spatialPath">Where to save the screen mapping, or null for the default.</param>
+    /// <param name="reach">
+    /// The working-area mode to start in, or null to reuse the mode this monitor was last
+    /// calibrated in. Either way it can be changed in the window before the first reach step.
+    /// </param>
+    public CalibrationWindow(string? gesturePath = null, string? spatialPath = null, ReachMode? reach = null)
     {
         _gesturePath = gesturePath;
         _spatialPath = spatialPath;
+        _requestedReach = reach;
 
         InitializeComponent();
 
@@ -102,6 +119,14 @@ public partial class CalibrationWindow : Window
             "Press and hold space",
         };
         ConfirmationMode.SelectedIndex = 0;
+
+        // Indexed by ReachMode. No selection yet: that waits for OnLoaded, which knows the
+        // monitor and so what it was last calibrated in.
+        ReachModeBox.ItemsSource = new[]
+        {
+            "Full screen — four corners",
+            "Side to side only — two points",
+        };
 
         Loaded += OnLoaded;
         Closing += OnClosing;
@@ -135,7 +160,9 @@ public partial class CalibrationWindow : Window
                 return;
             }
 
-            _steps = BuildSteps(_monitor);
+            _reachMode = _requestedReach ?? StoredReachMode(_monitor);
+            _steps = BuildSteps(_monitor, _reachMode);
+            ReachModeBox.SelectedIndex = (int)_reachMode;
 
             // One hand at a time: calibration measures a specific hand held in a specific
             // pose, so a second hand wandering into frame could only confuse which one is
@@ -171,7 +198,13 @@ public partial class CalibrationWindow : Window
         }
     }
 
-    private static WizardStep[] BuildSteps(MonitorInfo monitor) =>
+    /// <remarks>
+    /// The reach mode changes only the tail of the list — pose and idle steps are the same
+    /// in both — so the current step index stays valid when the mode is changed mid-wizard.
+    /// That invariant is what lets the mode be a plain selector rather than a wizard step of
+    /// its own, which would be one more step type for every step-type switch to handle.
+    /// </remarks>
+    private static WizardStep[] BuildSteps(MonitorInfo monitor, ReachMode reach) =>
     [
         new PoseStep("open", "Open hand",
             "Hold your hand OPEN, fingers spread, palm toward the camera.",
@@ -187,23 +220,63 @@ public partial class CalibrationWindow : Window
             "Put your hands where they sit when you're not using Freethrow — keyboard, mouse, lap.",
             "If the camera can't see them there, choose \"My hands are out of frame\". That is a normal setup, not a problem."),
 
-        new PointStep(0, "Top-left corner",
+        .. (reach switch
+        {
+            ReachMode.FullScreen => CornerSteps(monitor),
+            ReachMode.SideToSide => SideSteps(monitor),
+        }),
+
+        reach == ReachMode.SideToSide
+            ? new SweepStep("Maximum reach",
+                "Now sweep your hand as far LEFT and RIGHT as you can reach.",
+                "Height doesn't matter. This is measured once and is never where the screen edges land — it only gives room to overshoot without losing tracking.")
+            : new SweepStep("Maximum reach",
+                "Now sweep your hand around the FULL area you can reach.",
+                "Go as far as you can in every direction. This is measured once and is never where the screen edges land — it only gives room to overshoot without losing tracking."),
+    ];
+
+    private static WizardStep[] CornerSteps(MonitorInfo monitor) =>
+    [
+        new PointStep(Spot.TopLeft, "Top-left corner",
             $"Reach toward the TOP-LEFT marker on {monitor.Description}.",
             "Reach only as far as stays comfortable — this becomes the edge of your working area, and you will go there often."),
-        new PointStep(1, "Top-right corner",
+        new PointStep(Spot.TopRight, "Top-right corner",
             "Now the TOP-RIGHT marker.",
             "Same comfortable reach. Do not stretch."),
-        new PointStep(2, "Bottom-right corner",
+        new PointStep(Spot.BottomRight, "Bottom-right corner",
             "Now the BOTTOM-RIGHT marker.",
             "Same comfortable reach."),
-        new PointStep(3, "Bottom-left corner",
+        new PointStep(Spot.BottomLeft, "Bottom-left corner",
             "Now the BOTTOM-LEFT marker.",
             "Last corner. Same comfortable reach."),
-
-        new SweepStep("Maximum reach",
-            "Now sweep your hand around the FULL area you can reach.",
-            "Go as far as you can in every direction. This is measured once and is never where the screen edges land — it only gives room to overshoot without losing tracking."),
     ];
+
+    /// <remarks>
+    /// The hints say height does not matter because it is the one thing the user will
+    /// otherwise get wrong: aiming for the marker's height, halfway down the screen, is
+    /// what put the hand out of view in the first place.
+    /// </remarks>
+    private static WizardStep[] SideSteps(MonitorInfo monitor) =>
+    [
+        new PointStep(Spot.MidLeft, "Left edge",
+            $"Reach toward the LEFT marker on {monitor.Description}.",
+            "Height doesn't matter — reach at whatever height is comfortable and in view. Only how far left counts, and it becomes the edge of your working area."),
+        new PointStep(Spot.MidRight, "Right edge",
+            "Now the RIGHT marker.",
+            "Same comfortable reach, at about the same height. Do not stretch."),
+    ];
+
+    /// <summary>The mode this monitor was last calibrated in, so recalibrating does not mean choosing again.</summary>
+    /// <remarks>
+    /// A lid camera's profile goes stale whenever the lid is tilted, so recalibration is
+    /// routine on exactly the machines that need side to side. Keyed on the stored kind
+    /// rather than how it was captured: four corners too flat to steer by is as good a sign
+    /// as any that this camera cannot see vertical reach.
+    /// </remarks>
+    private ReachMode StoredReachMode(MonitorInfo monitor) =>
+        SpatialProfile.Load(_spatialPath)?.Find(monitor.DeviceName)?.Kind == MappingKind.HorizontalOnly
+            ? ReachMode.SideToSide
+            : ReachMode.FullScreen;
 
     /// <summary>Runs on a capture thread: hands the frame to display and to tracking.</summary>
     private void OnFrameArrived(object? sender, FrameEventArgs e)
@@ -448,7 +521,7 @@ public partial class CalibrationWindow : Window
                 ? "no hand detected — move into frame"
                 : $"hand left the camera's view at the {SideText(_lostAtEdges)} edge"
                   + (_mode == Mode.Capturing && Current is PointStep or SweepStep
-                      ? " — reach less far, or aim the camera toward your working area"
+                      ? LostHandAdvice(_lostAtEdges)
                       : string.Empty);
 
             TrackingText.Foreground = (Brush)FindResource("Warn");
@@ -485,21 +558,25 @@ public partial class CalibrationWindow : Window
         SampleCountText.Text = counter;
     }
 
+    /// <summary>What to do about a hand lost at the edge of the view while reaching.</summary>
+    /// <remarks>
+    /// In side-to-side mode a hand lost off the top or bottom is not reaching too far — height
+    /// is not being measured — and "reach less far" would send the user chasing the wrong
+    /// fix. The right one is simply to bring the hand back into view at any height.
+    /// </remarks>
+    private string LostHandAdvice(FrameEdge edges) =>
+        _reachMode == ReachMode.SideToSide && (edges & (FrameEdge.Left | FrameEdge.Right)) == 0
+            ? " — raise or lower your hand into view; height doesn't matter here"
+            : " — reach less far, or aim the camera toward your working area";
+
     private void ShowTestPointer(Vector2? metric)
     {
-        if (_overlay is null || _testTransform is null)
+        if (_overlay is null || _testMapping is null)
         {
             return;
         }
 
-        if (metric is not { } value)
-        {
-            _overlay.SetPointer(null);
-            return;
-        }
-
-        Vector2 mapped = _testTransform.Map(value);
-        _overlay.SetPointer(float.IsNaN(mapped.X) ? null : mapped);
+        _overlay.SetPointer(metric is { } value ? _testMapping.Map(value) : ScreenPoint.Nothing);
     }
 
     private void Blit(FrameRef frame)
@@ -537,7 +614,7 @@ public partial class CalibrationWindow : Window
         _recordingSweep = null;
 
         WizardStep step = Current;
-        StepLabel.Text = $"Step {index + 1} of {_steps.Length} — {step.Title}";
+        StepLabel.Text = StepLabelFor(index);
         PromptText.Text = step.Prompt;
         HintText.Text = step.Hint;
 
@@ -555,8 +632,17 @@ public partial class CalibrationWindow : Window
             ? Visibility.Visible
             : Visibility.Collapsed;
 
+        // The mode decides which reach steps follow, so it can change only before the first
+        // of them. Pose and idle steps always come first; after that the captured points
+        // belong to one mode and switching would strand them.
+        ReachPanel.Visibility = step is PoseStep or IdleStep
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+
         UpdateOverlayForStep(step);
     }
+
+    private string StepLabelFor(int index) => $"Step {index + 1} of {_steps.Length} — {_steps[index].Title}";
 
     private void UpdateOverlayForStep(WizardStep step)
     {
@@ -568,16 +654,20 @@ public partial class CalibrationWindow : Window
 
         _overlay ??= new CalibrationTargetOverlay();
         _overlay.ShowOn(_monitor!);
-        _overlay.SetPointer(null);
-        _overlay.SetShowAllCorners(true);
-        _overlay.SetTarget((step as PointStep)?.CornerIndex);
+        _overlay.SetPointer(ScreenPoint.Nothing);
+        _overlay.SetTargets(ReachSpots());
+        _overlay.SetTarget((step as PointStep)?.Target);
         _overlay.SetCaption(step switch
         {
+            SweepStep when _reachMode == ReachMode.SideToSide => "Sweep as far left and right as you can",
             SweepStep => "Sweep your whole reach",
             IdleStep => "Relax your arm",
             _ => "Reach to the highlighted marker",
         });
     }
+
+    /// <summary>The marks to draw, taken from the steps so the two can never disagree.</summary>
+    private Spot[] ReachSpots() => [.. _steps.OfType<PointStep>().Select(step => step.Target)];
 
     private void ShowIdleSkip(bool visible)
     {
@@ -607,7 +697,7 @@ public partial class CalibrationWindow : Window
                 break;
 
             case SweepStep:
-                _recordingSweep = new SweepCapture();
+                _recordingSweep = new SweepCapture(requireVertical: _reachMode == ReachMode.FullScreen);
                 break;
         }
 
@@ -643,8 +733,8 @@ public partial class CalibrationWindow : Window
                 _idle = _recordingIdle?.Result;
                 break;
 
-            case PointStep:
-                _corners.Add((_recordingPoint!.Result, _recordingPoint.EdgeContact));
+            case PointStep point:
+                _corners.Add((point.Target, _recordingPoint!.Result, _recordingPoint.EdgeContact));
                 break;
 
             case SweepStep:
@@ -691,8 +781,8 @@ public partial class CalibrationWindow : Window
 
     private void Finish()
     {
-        (MonitorMapping? mapping, string? problem) =
-            SpatialCalibration.Fit([.. _corners.Select(corner => corner.Position)], _idle, _monitor!);
+        (MonitorMapping? mapping, string? explanation, string? problem) =
+            SpatialCalibration.Fit(FitPoints(), _idle, _monitor!);
 
         if (mapping is null)
         {
@@ -701,11 +791,16 @@ public partial class CalibrationWindow : Window
         }
 
         _fittedMapping = mapping;
-        _testTransform = mapping.ToHomography();
+        _testMapping = mapping.ToMapping();
         _mode = Mode.Finished;
 
         string? edgeWarning = DescribeCameraEdges();
         Vector2 reach = _reach?.Extent ?? Vector2.Zero;
+
+        // The sweep's height is the camera's limit, not the arm's, when vertical was never asked for.
+        string reachSize = _reachMode == ReachMode.SideToSide
+            ? $"{reach.X * 100:0} cm wide"
+            : $"{reach.X * 100:0} x {reach.Y * 100:0} cm";
 
         StepLabel.Text = "Calibration complete";
         PromptText.Text = "Your profile";
@@ -714,7 +809,8 @@ public partial class CalibrationWindow : Window
             + $"{_fittedGesture.ReleaseOpenness:0.00}, no grab past view "
             + $"{_fittedGesture.MaxViewAxisAlignment:0.00}.\n"
             + $"Working area {WorkingAreaDescription()} mapped to {_monitor!.Description}, "
-            + $"inside a {reach.X * 100:0} x {reach.Y * 100:0} cm maximum reach.\n"
+            + $"inside a {reachSize} maximum reach.\n"
+            + $"{explanation}\n"
             + SpatialCalibration.DescribeIdle(mapping)
             + (edgeWarning is null ? string.Empty : $"\n\n{edgeWarning}");
 
@@ -723,6 +819,7 @@ public partial class CalibrationWindow : Window
         StatusText.Text = string.Empty;
         CaptureProgress.Value = 0;
         ConfirmationPanel.Visibility = Visibility.Collapsed;
+        ReachPanel.Visibility = Visibility.Collapsed;
 
         PrimaryButton.Content = "Save profile";
         SecondaryButton.Content = "Test the mapping";
@@ -732,17 +829,58 @@ public partial class CalibrationWindow : Window
         _overlay?.SetCaption("Calibration complete");
     }
 
+    /// <summary>The captured points in the order the fit expects.</summary>
+    /// <remarks>
+    /// Joined by name rather than taken in capture order, so the fit's corner order holds
+    /// however steps were redone. A missing point leaves the list short, which the fit
+    /// refuses by count with an explanation rather than a crash here.
+    /// </remarks>
+    private Vector2[] FitPoints()
+    {
+        Spot[] order = _reachMode switch
+        {
+            ReachMode.FullScreen => [Spot.TopLeft, Spot.TopRight, Spot.BottomRight, Spot.BottomLeft],
+            ReachMode.SideToSide => [Spot.MidLeft, Spot.MidRight],
+        };
+
+        return [.. order.Join(_corners, spot => spot, captured => captured.Target, (_, captured) => captured.Position)];
+    }
+
     private string WorkingAreaDescription()
     {
-        if (_corners.Count < 4)
+        if (_corners.Count == 0)
         {
             return "unknown";
         }
 
         float width = _corners.Max(c => c.Position.X) - _corners.Min(c => c.Position.X);
+        if (_reachMode == ReachMode.SideToSide)
+        {
+            return $"{width * 100:0} cm across (height not measured)";
+        }
+
         float height = _corners.Max(c => c.Position.Y) - _corners.Min(c => c.Position.Y);
         return $"{width * 100:0} x {height * 100:0} cm";
     }
+
+    private static string SpotName(Spot spot) => spot switch
+    {
+        Spot.TopLeft => "top-left corner",
+        Spot.TopRight => "top-right corner",
+        Spot.BottomRight => "bottom-right corner",
+        Spot.BottomLeft => "bottom-left corner",
+        Spot.MidLeft => "left point",
+        Spot.MidRight => "right point",
+    };
+
+    /// <summary>The frame borders worth warning about in the current mode.</summary>
+    /// <remarks>
+    /// In side-to-side mode the top and bottom of the view are expected limits — the mode
+    /// exists because the camera cannot see vertical reach — so warning about them would
+    /// report the premise as a fault.
+    /// </remarks>
+    private FrameEdge Relevant(FrameEdge edges) =>
+        _reachMode == ReachMode.SideToSide ? edges & (FrameEdge.Left | FrameEdge.Right) : edges;
 
     /// <summary>
     /// Names every measurement that was taken with the hand at the edge of the camera's view.
@@ -756,18 +894,20 @@ public partial class CalibrationWindow : Window
     {
         List<string> lines = [];
 
-        for (int i = 0; i < _corners.Count && i < CornerNames.Length; i++)
+        foreach ((Spot target, _, FrameEdge captured) in _corners)
         {
-            if (_corners[i].Edges != FrameEdge.None)
+            FrameEdge edges = Relevant(captured);
+            if (edges != FrameEdge.None)
             {
-                lines.Add($"The {CornerNames[i]} corner was captured at the {SideText(_corners[i].Edges)} edge "
+                lines.Add($"The {SpotName(target)} was captured at the {SideText(edges)} edge "
                     + "of the camera's view, so it may be off. Redo it, or aim the camera toward your working area.");
             }
         }
 
-        if (_reach is { ClippedSides: not FrameEdge.None } reach)
+        FrameEdge clipped = _reach is null ? FrameEdge.None : Relevant(_reach.ClippedSides);
+        if (clipped != FrameEdge.None)
         {
-            lines.Add($"Your maximum reach is cut off by the camera on the {SideText(reach.ClippedSides)}: "
+            lines.Add($"Your maximum reach is cut off by the camera on the {SideText(clipped)}: "
                 + "there it is the camera's limit, not your arm's.");
         }
 
@@ -780,17 +920,28 @@ public partial class CalibrationWindow : Window
         _mode = Mode.Testing;
 
         StepLabel.Text = "Testing the mapping";
-        PromptText.Text = "Move your hand and watch the dot";
-        HintText.Text =
-            "Reaching toward a marker should put the dot on it. Lean toward the camera and back — "
-            + "the dot should stay where it is, because position is measured in metres rather than pixels.";
+
+        if (_testMapping?.HasVertical == false)
+        {
+            PromptText.Text = "Move your hand side to side and watch the band";
+            HintText.Text =
+                "Only left-to-right is mapped, so the pointer is a band the height of the screen rather than a dot. "
+                + "Reaching toward a marker should put the band on it. Lean toward the camera and back — the band "
+                + "should stay where it is. Hold your hand still: the band should stay within about a window's width.";
+        }
+        else
+        {
+            PromptText.Text = "Move your hand and watch the dot";
+            HintText.Text =
+                "Reaching toward a marker should put the dot on it. Lean toward the camera and back — "
+                + "the dot should stay where it is, because position is measured in metres rather than pixels.";
+        }
 
         StatusText.Text = string.Empty;
         PrimaryButton.Content = "Save profile";
         SecondaryButton.Content = "Back to results";
 
         _overlay?.ShowOn(_monitor!);
-        _overlay?.SetShowAllCorners(true);
         _overlay?.SetTarget(null);
         _overlay?.SetCaption(string.Empty);
     }
@@ -807,21 +958,17 @@ public partial class CalibrationWindow : Window
                 BeginStep(_stepIndex);
                 break;
 
-            case Mode.StepComplete when Current is PoseStep && _steps[_stepIndex + 1] is not PoseStep:
+            case Mode.StepComplete when IsLastPoseStep:
                 // Last pose step: fit and apply the thresholds before any grab is asked for.
                 if (ApplyThresholds())
                 {
-                    BeginStep(_stepIndex + 1);
+                    Advance();
                 }
 
                 break;
 
-            case Mode.StepComplete when _stepIndex == _steps.Length - 1:
-                Finish();
-                break;
-
             case Mode.StepComplete:
-                BeginStep(_stepIndex + 1);
+                Advance();
                 break;
 
             case Mode.Testing:
@@ -846,10 +993,12 @@ public partial class CalibrationWindow : Window
                 break;
 
             case Mode.StepComplete:
-                // Drop whatever the step just recorded and take it again.
-                if (Current is PointStep && _corners.Count > 0)
+                // Drop whatever the step just recorded and take it again. By target, not
+                // "the last one added": that holds only while redo is reachable solely from
+                // the step that was just completed.
+                if (Current is PointStep redone)
                 {
-                    _corners.RemoveAt(_corners.Count - 1);
+                    _corners.RemoveAll(captured => captured.Target == redone.Target);
                 }
 
                 if (Current is IdleStep)
@@ -865,9 +1014,31 @@ public partial class CalibrationWindow : Window
                 break;
 
             case Mode.Testing:
-                _overlay?.SetPointer(null);
+                _overlay?.SetPointer(ScreenPoint.Nothing);
                 Finish();
                 break;
+        }
+    }
+
+    /// <summary>Whether this is the pose step after which the thresholds must be fitted.</summary>
+    /// <remarks>
+    /// Bounds-checked rather than peeking blindly at the next step, now that the list is
+    /// built per mode. Guarding only the peek would be worse than the crash it prevents:
+    /// the arm would stop matching, and a trailing pose step would fall through to
+    /// <see cref="Finish"/> without the thresholds ever being fitted.
+    /// </remarks>
+    private bool IsLastPoseStep =>
+        Current is PoseStep && (_stepIndex + 1 >= _steps.Length || _steps[_stepIndex + 1] is not PoseStep);
+
+    private void Advance()
+    {
+        if (_stepIndex == _steps.Length - 1)
+        {
+            Finish();
+        }
+        else
+        {
+            BeginStep(_stepIndex + 1);
         }
     }
 
@@ -881,6 +1052,34 @@ public partial class CalibrationWindow : Window
         }
     }
 
+    private void OnReachModeChanged(object sender, SelectionChangedEventArgs e)
+    {
+        // Also fires from OnLoaded setting the initial selection, when the steps already
+        // match it; and would fire before OnLoaded if anything selected earlier.
+        if (_monitor is null || _steps.Length == 0 || ReachModeBox.SelectedIndex < 0)
+        {
+            return;
+        }
+
+        var chosen = (ReachMode)ReachModeBox.SelectedIndex;
+        if (chosen == _reachMode)
+        {
+            return;
+        }
+
+        // Only reachable while the selector is shown, which is before the first reach step,
+        // so no captured point belongs to the old mode. The mode changes only the tail of the
+        // list, so the current index stays valid.
+        _reachMode = chosen;
+        _steps = BuildSteps(_monitor, _reachMode);
+        StepLabel.Text = StepLabelFor(_stepIndex);
+
+        if (Current is not PoseStep)
+        {
+            UpdateOverlayForStep(Current);
+        }
+    }
+
     private void RestartAll()
     {
         _poses.Clear();
@@ -888,7 +1087,7 @@ public partial class CalibrationWindow : Window
         _idle = null;
         _fittedGesture = null;
         _fittedMapping = null;
-        _testTransform = null;
+        _testMapping = null;
         _reach = null;
         BeginStep(0);
     }
@@ -933,6 +1132,7 @@ public partial class CalibrationWindow : Window
         StatusText.Text = string.Empty;
         CaptureProgress.Value = 0;
         ConfirmationPanel.Visibility = Visibility.Collapsed;
+        ReachPanel.Visibility = Visibility.Collapsed;
         PrimaryButton.Content = "Start over";
         PrimaryButton.IsEnabled = true;
         SecondaryButton.Visibility = Visibility.Collapsed;
@@ -997,7 +1197,7 @@ public partial class CalibrationWindow : Window
     private sealed record IdleStep(string Title, string Prompt, string Hint)
         : WizardStep(Title, Prompt, Hint);
 
-    private sealed record PointStep(int CornerIndex, string Title, string Prompt, string Hint)
+    private sealed record PointStep(Spot Target, string Title, string Prompt, string Hint)
         : WizardStep(Title, Prompt, Hint);
 
     private sealed record SweepStep(string Title, string Prompt, string Hint)

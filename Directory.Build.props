@@ -11,6 +11,18 @@
       startup and throws outright in invariant mode, taking the preview window with it.
     -->
     <InvariantGlobalization>false</InvariantGlobalization>
+
+    <!--
+      Switch expressions over enums like MappingKind and Spot are written without a discard
+      arm, so that adding a member is a build error at every place that must handle it —
+      a discard would silently route the new member to whatever the default does. CS8509
+      (a named member unhandled) is only a warning unless promoted. CS8524 fires even when
+      every named member is handled, because an enum can hold an unnamed value; the compiler
+      already throws SwitchExpressionException for one at runtime, so the warning adds
+      nothing and would force the very discard arm this is here to avoid.
+    -->
+    <WarningsAsErrors>$(WarningsAsErrors);CS8509</WarningsAsErrors>
+    <NoWarn>$(NoWarn);CS8524</NoWarn>
   </PropertyGroup>
 
   <PropertyGroup>

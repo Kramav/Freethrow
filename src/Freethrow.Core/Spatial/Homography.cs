@@ -51,6 +51,11 @@ public sealed class Homography
     /// </remarks>
     private const double MinimumSourceArea = 0.0064;
 
+    /// <summary>Why a set of corners that folds over itself was refused.</summary>
+    internal const string OutOfOrderProblem =
+        "The captured corners do not form a convex shape, so at least one was recorded "
+        + "out of position. Capture them again in order.";
+
     /// <summary>
     /// Fits a transform taking <paramref name="source"/> onto <paramref name="destination"/>.
     /// </summary>
@@ -69,19 +74,27 @@ public sealed class Homography
             return (null, "A homography needs exactly four point pairs.");
         }
 
-        double area = Math.Abs(SignedArea(source));
-        if (area < MinimumSourceArea)
+        // The order of these three checks decides which explanation the user gets, and each
+        // is wrong advice in the other's case. A bow tie — two corners swapped — encloses
+        // almost no shoelace area, so testing that first told people who reached in the wrong
+        // order to "reach further apart". But testing convexity first would let millimetres of
+        // noise on a genuinely thin capture flip a turn and blame the order instead. The
+        // bounding box separates them: it is large for a bow tie and small for a thin capture.
+        double extent = BoundingArea(source);
+        if (extent < MinimumSourceArea)
         {
-            return (null,
-                $"The captured corners enclose only {area * 10000:0} cm², which is too small to "
-                + "map a screen onto. Reach further apart at each corner.");
+            return (null, TooSmall(extent));
         }
 
         if (!IsConvex(source))
         {
-            return (null,
-                "The captured corners do not form a convex shape, so at least one was recorded "
-                + "out of position. Capture them again in order.");
+            return (null, OutOfOrderProblem);
+        }
+
+        double area = Math.Abs(SignedArea(source));
+        if (area < MinimumSourceArea)
+        {
+            return (null, TooSmall(area));
         }
 
         // Two rows per correspondence, from u = (h11 x + h12 y + h13) / (h31 x + h32 y + 1)
@@ -150,6 +163,14 @@ public sealed class Homography
         return new Homography(coefficients);
     }
 
+    private static string TooSmall(double area) =>
+        $"The captured corners enclose only {area * 10000:0} cm², which is too small to "
+        + "map a screen onto. Reach further apart at each corner.";
+
+    /// <summary>Area of the axis-aligned box around the points.</summary>
+    private static double BoundingArea(IReadOnlyList<Vector2> points) =>
+        (points.Max(p => p.X) - points.Min(p => p.X)) * (double)(points.Max(p => p.Y) - points.Min(p => p.Y));
+
     /// <summary>Shoelace area; the sign also reveals winding order.</summary>
     private static double SignedArea(IReadOnlyList<Vector2> points)
     {
@@ -168,11 +189,12 @@ public sealed class Homography
     /// Whether the quadrilateral is convex, judged by every turn going the same way.
     /// </summary>
     /// <remarks>
-    /// A non-convex result means a corner was captured out of position — typically the
-    /// hand drifted between the prompt and the confirmation. Fitting it anyway produces
-    /// a transform that folds over itself.
+    /// A non-convex result means a corner was captured out of position — reached in the
+    /// wrong order, or the hand drifted between the prompt and the confirmation. Fitting it
+    /// anyway produces a transform that folds over itself. Either winding is accepted, and a
+    /// fully collinear set counts as convex; area checks catch that case instead.
     /// </remarks>
-    private static bool IsConvex(IReadOnlyList<Vector2> points)
+    internal static bool IsConvex(IReadOnlyList<Vector2> points)
     {
         bool sawPositive = false;
         bool sawNegative = false;

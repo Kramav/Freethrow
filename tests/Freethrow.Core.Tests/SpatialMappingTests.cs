@@ -154,8 +154,30 @@ public class SpatialMappingTests
 
         (Homography? transform, string? problem) = Homography.TryFit(bowTie, UnitSquare);
 
+        // It must say why. A bow tie encloses almost no area, and this used to be told to
+        // "reach further apart" — the wrong advice for corners reached in the wrong order.
         Assert.Null(transform);
-        Assert.NotNull(problem);
+        Assert.Contains("order", problem);
+    }
+
+    [Fact]
+    public void AThinNoisyCaptureIsTooSmallRatherThanOutOfOrder()
+    {
+        // Half a centimetre tall, with one corner nudged a millimetre so that noise flips a
+        // turn. It is not convex, but the honest explanation is that it has no height — not
+        // that the corners were taken out of order.
+        Vector2[] thin =
+        [
+            new(-0.225f, -0.002f),
+            new(0.225f, -0.002f),
+            new(0.225f, -0.003f),
+            new(-0.225f, 0.002f),
+        ];
+
+        (Homography? transform, string? problem) = Homography.TryFit(thin, UnitSquare);
+
+        Assert.Null(transform);
+        Assert.Contains("too small", problem);
     }
 
     [Fact]
