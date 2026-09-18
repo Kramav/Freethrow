@@ -288,7 +288,27 @@ Two safeguards, because that estimate is noisy: smooth it per hand with the exis
 
 **Instrumented:** `Demo.Preview` displays FPS, per-stage latency (ms), CPU %, and working set. The efficiency requirement is verified by reading these in each power state, not asserted.
 
-Targets: ≥25 FPS engaged end to end; <60 ms hand-motion-to-window-motion latency; Idle-state CPU near zero; working set <300 MB.
+**Targets, per hardware class.** One flat number was wrong. The second machine's only
+camera caps capture at 15.9 fps, and nothing the pipeline does reaches a 60 ms
+motion-to-window budget when frames arrive 63 ms apart. Splitting the target separates what
+this code owns from what the sensor dictates, so that a slow camera reads as a slow camera
+instead of as a performance bug.
+
+| | Reference class (≥25 fps capture) | Floor class (~16 fps capture) |
+|---|---|---|
+| Engaged frame rate | ≥25 FPS end to end | keeps pace with capture, 0 dropped |
+| Pipeline latency (frame delivered → window moved) | <30 ms | <30 ms |
+| Hand motion → window motion | <60 ms | sensor-limited — measure it, do not assume it |
+| Idle CPU | near zero | near zero |
+| Working set | <300 MB | <300 MB |
+
+The pipeline row is the only claim about this code, and it is deliberately identical in both
+columns. Its budget is what remains of the 60 ms once measured capture latency is spent
+(27.5 ms on the laptop), and the tracking loop already takes 5.7–7.0 ms of it. The
+end-to-end row is a property of the machine, not of the software.
+
+Floor class is a supported target, not a degraded mode. Assuming good hardware is how a
+gesture system ends up working only in the room it was written in.
 
 **Manual end-to-end (M4 acceptance):** with ≥2 monitors — look at monitor 2, raise hand, confirm a window highlights on hover, grab, drag across the boundary, release. Then repeat with a flick. Then look at monitor 1 and throw it back. Confirm: maximized windows restore correctly, mixed-DPI moves scale correctly, elevated windows fail loudly, and looking away mid-drag aborts safely.
 
