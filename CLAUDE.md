@@ -154,16 +154,39 @@ Do them before M2.
 
 ## Reference measurements
 
-From the original development laptop (Intel Iris Xe, 1920×1200 @ 120 DPI, integrated
-webcam). **Treat as expectations to re-measure, not as facts about a new machine.**
+Two machines, and they are **not** interchangeable. Re-measure on a third rather than
+assuming either column applies to it.
 
-| | Value |
-|---|---|
-| Capture | 640×480 NV12, ~28 fps, 0 dropped |
-| Capture latency | 33 ms mean (sensor to handler) |
-| Palm detection | ~10 ms per run |
-| Tracking loop | 5.7–7.0 ms mean per frame |
-| Allocation | ~18 KB/frame (WinRT projection churn; frame buffers are pooled) |
+- **Laptop** — Intel Iris Xe, 1920×1200 @ 120 DPI, integrated webcam. Every number here
+  was originally fitted on this machine. Capture rows re-measured 2026-09-18 (Release,
+  4 s probe); the two model rows have not been re-measured since.
+- **Adesso** — the second machine. An Adesso CyberTrack K4 is its *only* camera, so its
+  rate is a floor, not a setting.
 
-Capture latency alone consumes over half the 60 ms end-to-end budget, which is the main
-constraint on everything downstream.
+| | Laptop | Adesso CyberTrack K4 |
+|---|---|---|
+| Capture | 640×480 NV12, ~27 fps, 0 dropped | 640×480 NV12, **15.9 fps** |
+| Capture latency | 27.5 ms mean (sensor to handler) | not measured |
+| Palm detection | ~10 ms per run | not measured |
+| Tracking loop | 5.7–7.0 ms mean per frame | not measured |
+| Allocation | ~25 KB/frame (WinRT projection churn; frame buffers are pooled) | not measured |
+
+Capture latency alone consumes nearly half the 60 ms end-to-end budget on the laptop, which
+is the main constraint on everything downstream.
+
+**On the Adesso that budget is gone at the sensor.** 15.9 fps is 63 ms between frames, so
+the capture interval alone exceeds the whole 60 ms hand-motion-to-window-motion target
+before tracking, gesture or window work runs at all. No pipeline optimization reaches it —
+nothing can react to motion the camera has not sampled. That machine needs its own target.
+Flick detection (M4) is where it will hurt most: a flick is measured over a handful of
+frames, and there are half as many.
+
+Its other formats were measured too, because "offers 30 formats" is not an answer when a
+camera runs at half its nominal rate. NV12, YUY2 and MJPG all advertise 25 fps at
+640×480; NV12 delivered 15.9, YUY2 14.1, and **MJPG failed to start outright** with
+`OutputFormatNotSupported`. `--formats` lists what a device offers and
+`--probe [i] [secs] [sub]` forces one, so this is re-checkable anywhere.
+
+**Allocation was ~18 KB/frame when first recorded and measures ~25 KB today**, identically
+in Debug and Release. Nobody has found the extra 7 KB. It is well inside budget, so it is
+noted rather than chased — but it is drift, not noise.
