@@ -247,8 +247,8 @@ Two safeguards, because that estimate is noisy: smooth it per hand with the exis
 | **M1** ✅ | ONNX hand tracking, gesture FSM, One-Euro smoothing, landmarks + state in preview | Grab/release is reliable before anything moves |
 | **M1.5** ✅ | World landmarks, 3D openness, posture gate on arming, time-based decaying debounce, measured defaults, visual `--calibrate-grab` | Grabs fire only when meant, and release when meant |
 | **M1.6** ✅ | Metric hand space, 4-corner homography per monitor, `MonitorTopology`, on-screen target overlay, live mapping test | Hand position means something on screen |
-| **M1.7** ← | Multi-hand tracking with duplicate suppression and a throttled rescan, grab-first-wins arbitration, hover on the nearest hand | The hand you raise is the hand that acts |
-| **M2** | `WindowManager`, `WindowCache`, overlay, hover-highlight + grab-drag on a **single** monitor, first pass at the gain curve, hands ignored until they leave the idle zone | The core interaction feels right |
+| **M1.7** ✅ | Multi-hand tracking with duplicate suppression and a throttled rescan, grab-first-wins arbitration, hover on the nearest hand | The hand you raise is the hand that acts |
+| **M2** ← | `WindowManager`, `WindowCache`, overlay, hover-highlight + grab-drag on a **single** monitor, first pass at the gain curve, hands ignored until they leave the idle zone | The core interaction feels right |
 | **M3** | Head pose, attention classifier, calibration wizard (per-monitor gaze), monitor gating | Attention actually gates control |
 | **M4** | Throw physics, look-to-place, multi-monitor + DPI correctness | The headline feature |
 | **M5** | Adaptive scheduling, quantization, allocation audit, `install.ps1`, IR opt-in path | Ships and stays cheap |

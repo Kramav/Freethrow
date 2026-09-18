@@ -49,15 +49,16 @@ dotnet run --project demos\Freethrow.Demo.Preview -- --probe
 dotnet build Freethrow.sln
 dotnet test tests\Freethrow.Core.Tests\Freethrow.Core.Tests.csproj
 
-dotnet run --project demos\Freethrow.Demo.Preview                        # preview window
-dotnet run --project demos\Freethrow.Demo.Preview -- --list              # cameras, IR included
-dotnet run --project demos\Freethrow.Demo.Preview -- --probe [i] [secs]  # capture health
-dotnet run --project demos\Freethrow.Demo.Preview -- --track [secs]      # tracking + arbitration
-dotnet run --project demos\Freethrow.Demo.Preview -- --monitors          # displays + mappings
-dotnet run --project demos\Freethrow.Demo.Preview -- --overlay [secs]    # overlay placement
-dotnet run --project demos\Freethrow.Demo.Preview -- --calibrate-grab    # calibration wizard
-dotnet run --project demos\Freethrow.Demo.Preview -- --snap f.ftraw      # save one raw frame
-dotnet run --project demos\Freethrow.Demo.Preview -- --landmarks f.ftraw # track a saved frame
+dotnet run --project demos\Freethrow.Demo.Preview                              # preview window
+dotnet run --project demos\Freethrow.Demo.Preview -- --list                    # cameras, IR included
+dotnet run --project demos\Freethrow.Demo.Preview -- --formats [i]             # every format a camera offers
+dotnet run --project demos\Freethrow.Demo.Preview -- --probe [i] [secs] [sub]  # capture health; [sub] forces a subtype
+dotnet run --project demos\Freethrow.Demo.Preview -- --track [secs]            # tracking + arbitration
+dotnet run --project demos\Freethrow.Demo.Preview -- --monitors                # displays + mappings
+dotnet run --project demos\Freethrow.Demo.Preview -- --overlay [secs]          # overlay placement
+dotnet run --project demos\Freethrow.Demo.Preview -- --calibrate-grab          # calibration wizard
+dotnet run --project demos\Freethrow.Demo.Preview -- --snap f.ftraw            # save one raw frame
+dotnet run --project demos\Freethrow.Demo.Preview -- --landmarks f.ftraw       # track a saved frame
 ```
 
 ## Layout
